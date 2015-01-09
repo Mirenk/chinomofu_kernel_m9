@@ -116,12 +116,13 @@ struct inodes_stat_t {
 #define BLKROTATIONAL _IO(0x12,126)
 #define BLKZEROOUT _IO(0x12,127)
 
-#define BMAP_IOCTL 1		
-#define FIBMAP	   _IO(0x00,1)	
-#define FIGETBSZ   _IO(0x00,2)	
-#define FIFREEZE	_IOWR('X', 119, int)	
-#define FITHAW		_IOWR('X', 120, int)	
-#define FITRIM		_IOWR('X', 121, struct fstrim_range)	
+#define BMAP_IOCTL 1		/* obsolete - kept for compatibility */
+#define FIBMAP	   _IO(0x00,1)	/* bmap access */
+#define FIGETBSZ   _IO(0x00,2)	/* get the block size used for bmap */
+#define FIFREEZE	_IOWR('X', 119, int)	/* Freeze */
+#define FITHAW		_IOWR('X', 120, int)	/* Thaw */
+#define FITRIM		_IOWR('X', 121, struct fstrim_range)	/* Trim */
+#define FS_IOC_SHUTDOWN	_IOR('X', 125, __u32)	/* Shutdown */
 
 #define FIDTRIM	_IOWR('f', 128, struct fstrim_range)	
 
@@ -167,4 +168,11 @@ struct inodes_stat_t {
 #define SYNC_FILE_RANGE_WRITE		2
 #define SYNC_FILE_RANGE_WAIT_AFTER	4
 
-#endif 
+/*
+ * Flags for going down operation used by FS_IOC_GOINGDOWN
+ */
+#define FS_GOING_DOWN_FULLSYNC	0x0	/* going down with full sync */
+#define FS_GOING_DOWN_METASYNC	0x1	/* going down with metadata */
+#define FS_GOING_DOWN_NOSYNC	0x2	/* going down */
+
+#endif /* _UAPI_LINUX_FS_H */
