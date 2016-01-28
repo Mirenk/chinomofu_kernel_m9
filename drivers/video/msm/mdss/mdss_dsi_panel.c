@@ -24,6 +24,7 @@
 #include <linux/string.h>
 #include <linux/debug_display.h>
 
+#include <linux/display_state.h>
 #include "mdss_dsi.h"
 #include "mdss_htc_util.h"
 #include "mdss_livedisplay.h"
@@ -33,6 +34,13 @@
 #define DEFAULT_MDP_TRANSFER_TIME 14000
 
 #define MDSS_BL_SETTING_DEF 142
+
+bool display_on = true;
+
+bool is_display_on(void)
+{
+        return display_on;
+}
 
 DEFINE_LED_TRIGGER(bl_led_trigger);
 
@@ -659,6 +667,8 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 		return -EINVAL;
 	}
 
+	display_on = true;
+
 	pinfo = &pdata->panel_info;
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
@@ -710,6 +720,8 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 
 	if (ctrl->off_cmds.cmd_cnt)
 		mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds, CMD_REQ_COMMIT);
+
+	display_on = false;
 
 end:
 	pinfo->blank_state = MDSS_PANEL_BLANK_BLANK;
@@ -1728,7 +1740,7 @@ static int htc_mdss_dsi_parse_brt_bl_table(struct device_node *np,
 	if (!data || len % 2) {
 		pr_debug("%s: read %s failed\n", __func__, name);
 	} else {
-		
+
 		len /= 2;
 
 		if (brt_bl_table->size || brt_bl_table->brt_data || brt_bl_table->bl_data) {
@@ -1770,7 +1782,7 @@ static int htc_mdss_dsi_parse_nits_table(struct device_node *np,
 		pr_debug("%s: read %s failed\n", __func__, name);
 	} else {
 		len /= sizeof(u32);
-		
+
 		nits_bl_table->data = kzalloc(len * sizeof(u16), GFP_KERNEL);
 		if (!nits_bl_table->data) {
 			pr_err("%s:%d, allocate memory failed %s\n", __func__, __LINE__, name);
@@ -2093,7 +2105,7 @@ static int mdss_panel_parse_dt(struct device_node *np,
 		pr_err("%s: failed to parse panel features\n", __func__);
 		goto error;
 	}
-	
+
 	rc = of_property_read_u32(np, "htc,mdss-skip-first-pinctl", &tmp);
 	pinfo->skip_first_pinctl = (!rc ? tmp : 0);
 
@@ -2143,18 +2155,18 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	rc = of_property_read_u32(np, "htc,mdss-sre-ebi-level", &tmp);
 	ctrl_pdata->sre_ebi_value = (!rc ? tmp : 0);
 
-	
+
 	pinfo->brt_bl_table.size = 0;
 	htc_mdss_dsi_parse_brt_bl_table(np, pinfo, "htc,brt-bl-table");
 
-	
+
 	pinfo->nits_bl_table.size = 0;
 	pinfo->nits_bl_table.scale = 0;
 	pinfo->nits_bl_table.max_nits = 0;
 	htc_mdss_dsi_parse_nits_table(np, pinfo,
 		"htc,nits-bl-table", "htc,nits-bl-table-scale");
 
-	
+
 
 	mdss_dsi_parse_panel_horizintal_line_idle(np, ctrl_pdata);
 
