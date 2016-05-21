@@ -98,3 +98,5 @@ obj-$(CONFIG_MSM_PACMAN)        += msm_pacman.o
 
 # For HTC Implementation of Power Control of LCM power source
 obj-y += display/
+
+obj-$(CONFIG_STATE_NOTIFIER)		+= state_notifier.o
