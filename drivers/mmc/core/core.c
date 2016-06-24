@@ -41,7 +41,7 @@
 #include <trace/events/mmc.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmcio.h>
-#include <trace/events/f2fs.h>
+//#include <trace/events/f2fs.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
