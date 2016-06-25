@@ -158,7 +158,11 @@
 
 #define IPA_MEM_v2_RAM_MODEM_OFST (IPA_MEM_v2_RAM_APPS_HDR_OFST + \
 		IPA_MEM_v2_RAM_APPS_HDR_SIZE + IPA_MEM_CANARY_SIZE)
+#ifdef CONFIG_SPRINT
+#define IPA_MEM_v2_RAM_MODEM_SIZE 6824
+#else
 #define IPA_MEM_v2_RAM_MODEM_SIZE 3532
+#endif
 
 /* modem memory is 4B aligned */
 #if (IPA_MEM_v2_RAM_MODEM_OFST & 3)
@@ -167,7 +171,11 @@
 
 #define IPA_MEM_v2_RAM_APPS_V4_FLT_OFST (IPA_MEM_v2_RAM_MODEM_OFST + \
 		IPA_MEM_v2_RAM_MODEM_SIZE + IPA_MEM_CANARY_SIZE)
+#ifdef CONFIG_SPRINT
+#define IPA_MEM_v2_RAM_APPS_V4_FLT_SIZE 0
+#else
 #define IPA_MEM_v2_RAM_APPS_V4_FLT_SIZE 1920
+#endif
 
 /* filtering rule is 4B aligned */
 #if (IPA_MEM_v2_RAM_APPS_V4_FLT_OFST & 3)
@@ -176,7 +184,11 @@
 
 #define IPA_MEM_v2_RAM_APPS_V6_FLT_OFST (IPA_MEM_v2_RAM_APPS_V4_FLT_OFST + \
 		IPA_MEM_v2_RAM_APPS_V4_FLT_SIZE)
+#ifdef CONFIG_SPRINT
+#define IPA_MEM_v2_RAM_APPS_V6_FLT_SIZE 0
+#else
 #define IPA_MEM_v2_RAM_APPS_V6_FLT_SIZE 1372
+#endif
 
 /* filtering rule is 4B aligned */
 #if (IPA_MEM_v2_RAM_APPS_V6_FLT_OFST & 3)
