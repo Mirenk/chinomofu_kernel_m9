@@ -32,10 +32,10 @@
 #include <linux/jiffies.h>
 #include <linux/statfs.h>
 #include <linux/debugfs.h>
-#include <linux/f2fs_fs.h>
+//#include <linux/f2fs_fs.h>
 
-#include "../../../fs/f2fs/f2fs.h"
-#include "../../../fs/f2fs/segment.h"
+//#include "../../../fs/f2fs/f2fs.h"
+//#include "../../../fs/f2fs/segment.h"
 
 
 #include <trace/events/mmc.h>
