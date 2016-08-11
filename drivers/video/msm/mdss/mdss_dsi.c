@@ -1481,9 +1481,6 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 			rc = mdss_dsi_blank(pdata, power_state);
 		rc = mdss_dsi_off(pdata, power_state);
 		lcd_notifier_call_chain(LCD_EVENT_OFF_END, NULL);
-#ifdef CONFIG_STATE_NOTIFIER
-		state_suspend();
-#endif
 		break;
 	case MDSS_EVENT_CONT_SPLASH_FINISH:
 		if (ctrl_pdata->off_cmds.link_state == DSI_LP_MODE)
