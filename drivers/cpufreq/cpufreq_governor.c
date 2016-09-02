@@ -370,7 +370,6 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		} else if (dbs_data->cdata->governor == GOV_ALUCARD) {
 			ac_ops->get_cpu_frequency_table(cpu);
 			ac_ops->get_cpu_frequency_table_minmax(policy, cpu);
-			ac_ops->get_cpu_cached_tuners(policy, cpu);
 			ac_dbs_info->up_rate = 1;
 			ac_dbs_info->down_rate = 1;
 		} else {
@@ -391,8 +390,6 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	case CPUFREQ_GOV_STOP:
 		if (dbs_data->cdata->governor == GOV_CONSERVATIVE)
 			cs_dbs_info->enable = 0;
-		} else if (dbs_data->cdata->governor == GOV_ALUCARD) {
-			ac_ops->set_cpu_cached_tuners(policy, cpu);
 
 		gov_cancel_work(dbs_data, policy);
 
