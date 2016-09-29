@@ -1872,50 +1872,7 @@ static void binder_transaction(struct binder_proc *proc,
 			ret = binder_translate_handle(fp, t, thread);
 			if (ret < 0) {
 				return_error = BR_FAILED_REPLY;
-<<<<<<< HEAD
-				goto err_binder_get_ref_failed;
-			}
-			if (security_binder_transfer_binder(proc->tsk, target_proc->tsk)) {
-				return_error = BR_FAILED_REPLY;
-				goto err_binder_get_ref_failed;
-			}
-			if (ref->node->proc == target_proc) {
-				if (hdr->type == BINDER_TYPE_HANDLE)
-					hdr->type = BINDER_TYPE_BINDER;
-				else
-					hdr->type = BINDER_TYPE_WEAK_BINDER;
-				fp->binder = ref->node->ptr;
-				fp->cookie = ref->node->cookie;
-				binder_inc_node(ref->node,
-						hdr->type == BINDER_TYPE_BINDER,
-						0, NULL);
-				trace_binder_transaction_ref_to_node(t, ref);
-				binder_debug(BINDER_DEBUG_TRANSACTION,
-					     "        ref %d desc %d -> node %d u%016llx\n",
-					     ref->debug_id, ref->desc, ref->node->debug_id,
-					     (u64)ref->node->ptr);
-			} else {
-				struct binder_ref *new_ref;
-
-				new_ref = binder_get_ref_for_node(target_proc, ref->node);
-				if (new_ref == NULL) {
-					return_error = BR_FAILED_REPLY;
-					goto err_binder_get_ref_for_node_failed;
-				}
-				fp->handle = new_ref->desc;
-				fp->cookie = 0;
-				binder_inc_ref(new_ref,
-					       hdr->type == BINDER_TYPE_HANDLE,
-					       NULL);
-				trace_binder_transaction_ref_to_ref(t, ref,
-								    new_ref);
-				binder_debug(BINDER_DEBUG_TRANSACTION,
-					     "        ref %d desc %d -> ref %d desc %d (node %d)\n",
-					     ref->debug_id, ref->desc, new_ref->debug_id,
-					     new_ref->desc, ref->node->debug_id);
-=======
 				goto err_translate_failed;
->>>>>>> 31ce1ec28052... android: binder: refactor binder_transact()
 			}
 		} break;
 
