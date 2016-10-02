@@ -1,7 +1,7 @@
 /*
- * Alucard - Load Sensitive CPU Frequency Governor
+ * Darkness - Load Sensitive CPU Frequency Governor
  *
- * Copyright (c) 2011-2016, Alucard24 <dmbaoh2@gmail.com>
+ * Copyright (c) 2010-2016, Alucard24 <dmbaoh2@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -27,7 +27,7 @@
 #include <linux/state_notifier.h>
 #endif
 
-struct cpufreq_alucard_policyinfo {
+struct cpufreq_darkness_policyinfo {
 	struct timer_list policy_timer;
 	struct timer_list policy_slack_timer;
 	spinlock_t load_lock; /* protects load tracking stat */
@@ -40,21 +40,19 @@ struct cpufreq_alucard_policyinfo {
 	struct rw_semaphore enable_sem;
 	bool reject_notification;
 	int governor_enabled;
-	struct cpufreq_alucard_tunables *cached_tunables;
+	struct cpufreq_darkness_tunables *cached_tunables;
 	unsigned long *cpu_busy_times;
-	unsigned int up_rate:1;
-	unsigned int down_rate:1;
 };
 
 /* Protected by per-policy load_lock */
-struct cpufreq_alucard_cpuinfo {
+struct cpufreq_darkness_cpuinfo {
 	u64 time_in_idle;
 	u64 time_in_idle_timestamp;
 	unsigned int load;
 };
 
-static DEFINE_PER_CPU(struct cpufreq_alucard_policyinfo *, polinfo);
-static DEFINE_PER_CPU(struct cpufreq_alucard_cpuinfo, cpuinfo);
+static DEFINE_PER_CPU(struct cpufreq_darkness_policyinfo *, polinfo);
+static DEFINE_PER_CPU(struct cpufreq_darkness_cpuinfo, cpuinfo);
 
 /* realtime thread handles frequency scaling */
 static struct task_struct *speedchange_task;
@@ -65,21 +63,7 @@ static struct mutex gov_lock;
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
 #define DEFAULT_TIMER_RATE_SUSP ((unsigned long)(50 * USEC_PER_MSEC))
 
-#define FREQ_RESPONSIVENESS			1248000
-
-#define CPUS_DOWN_RATE				1
-#define CPUS_UP_RATE				1
-#define DEC_CPU_LOAD				70
-#define DEC_CPU_LOAD_AT_MIN_FREQ	60
-#define INC_CPU_LOAD				70
-#define INC_CPU_LOAD_AT_MIN_FREQ	60
-
-#define PUMP_INC_STEP_AT_MIN_FREQ	2
-#define PUMP_INC_STEP				1
-#define PUMP_DEC_STEP_AT_MIN_FREQ	2
-#define PUMP_DEC_STEP				1
-
-struct cpufreq_alucard_tunables {
+struct cpufreq_darkness_tunables {
 	int usage_count;
 	/*
 	 * The sample rate of the timer used to increase frequency
@@ -99,31 +83,17 @@ struct cpufreq_alucard_tunables {
 	 * Whether to align timer windows across all CPUs.
 	 */
 	bool align_windows;
-	/*
-	 * CPUs frequency scaling
-	 */
-	int inc_cpu_load_at_min_freq;
-	int inc_cpu_load;
-	int dec_cpu_load_at_min_freq;
-	int dec_cpu_load;
-	int freq_responsiveness;
-	unsigned int cpus_up_rate;
-	unsigned int cpus_down_rate;
-	int pump_inc_step;
-	int pump_inc_step_at_min_freq;
-	int pump_dec_step;
-	int pump_dec_step_at_min_freq;
 };
 
 /* For cases where we have single governor instance for system */
-static struct cpufreq_alucard_tunables *common_tunables;
-static struct cpufreq_alucard_tunables *cached_common_tunables;
+static struct cpufreq_darkness_tunables *common_tunables;
+static struct cpufreq_darkness_tunables *cached_common_tunables;
 
 static struct attribute_group *get_sysfs_attr(void);
 
 /* Round to starting jiffy of next evaluation window */
 static u64 round_to_nw_start(u64 jif,
-			     struct cpufreq_alucard_tunables *tunables)
+			     struct cpufreq_darkness_tunables *tunables)
 {
 	unsigned long step = usecs_to_jiffies(tunables->timer_rate);
 	u64 ret;
@@ -138,12 +108,12 @@ static u64 round_to_nw_start(u64 jif,
 	return ret;
 }
 
-static void cpufreq_alucard_timer_resched(unsigned long cpu,
+static void cpufreq_darkness_timer_resched(unsigned long cpu,
 					      bool slack_only)
 {
-	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
-	struct cpufreq_alucard_cpuinfo *pcpu;
-	struct cpufreq_alucard_tunables *tunables =
+	struct cpufreq_darkness_policyinfo *ppol = per_cpu(polinfo, cpu);
+	struct cpufreq_darkness_cpuinfo *pcpu;
+	struct cpufreq_darkness_tunables *tunables =
 		ppol->policy->governor_data;
 	u64 expires;
 	unsigned long flags;
@@ -178,11 +148,11 @@ static void cpufreq_alucard_timer_resched(unsigned long cpu,
  * The policy_timer and policy_slack_timer must be deactivated when calling
  * this function.
  */
-static void cpufreq_alucard_timer_start(
-	struct cpufreq_alucard_tunables *tunables, int cpu)
+static void cpufreq_darkness_timer_start(
+	struct cpufreq_darkness_tunables *tunables, int cpu)
 {
-	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
-	struct cpufreq_alucard_cpuinfo *pcpu;
+	struct cpufreq_darkness_policyinfo *ppol = per_cpu(polinfo, cpu);
+	struct cpufreq_darkness_cpuinfo *pcpu;
 	u64 expires = round_to_nw_start(ppol->last_evaluated_jiffy, tunables);
 	unsigned long flags;
 	int i;
@@ -206,51 +176,50 @@ static void cpufreq_alucard_timer_start(
 	spin_unlock_irqrestore(&ppol->load_lock, flags);
 }
 
-static unsigned int choose_target_freq(struct cpufreq_alucard_policyinfo *pcpu,
-					unsigned int step, bool isup)
+static unsigned int choose_freq(struct cpufreq_darkness_policyinfo *pcpu,
+					unsigned int tmp_freq)
 {
 	struct cpufreq_policy *policy = pcpu->policy;
 	struct cpufreq_frequency_table *table = pcpu->freq_table;
 	struct cpufreq_frequency_table *pos;
-	unsigned int i = 0, target_freq = 0, freq;
-	int count = 0;
+	unsigned int i = 0, l_freq = 0, h_freq = 0, target_freq = 0, freq;
 
-	if (!policy || !table || !step)
-		return 0;
+	if (tmp_freq < policy->min)
+		tmp_freq = policy->min;
+	if (tmp_freq > policy->max)
+		tmp_freq = policy->max;
 
 	cpufreq_for_each_valid_entry(pos, table) {
 		freq = pos->frequency;
 		i = pos - table;
-		if (isup) {
-			if (freq > policy->cur) {
-				target_freq = freq;
-				count++;
-				if (count == step)
-					break;
-			}
-		} else {
-			if (freq == policy->cur) {
-				for (count = (i - 1); count >= 0; count--) {
-					if (table[count].frequency != CPUFREQ_ENTRY_INVALID) {
-						target_freq = table[count].frequency;
-						step--;
-					}
-					if (step == 0)
-						break;
-				}
-				break;
-			}
+		if (freq < tmp_freq) {
+			h_freq = freq;
+		}
+		if (freq == tmp_freq) {
+			target_freq = freq;
+			break;
+		}
+		if (freq > tmp_freq) {
+			l_freq = freq;
+			break;
 		}
 	}
-	
+	if (!target_freq) {
+		if (policy->cur >= h_freq
+			 && policy->cur <= l_freq)
+			target_freq = policy->cur;
+		else
+			target_freq = l_freq;
+	}
+
 	return target_freq;
 }
 
 static bool update_load(int cpu)
 {
-	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
-	struct cpufreq_alucard_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
-	struct cpufreq_alucard_tunables *tunables =
+	struct cpufreq_darkness_policyinfo *ppol = per_cpu(polinfo, cpu);
+	struct cpufreq_darkness_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
+	struct cpufreq_darkness_tunables *tunables =
 		ppol->policy->governor_data;
 	struct cpufreq_govinfo govinfo;
 	u64 now;
@@ -290,21 +259,16 @@ static bool update_load(int cpu)
 	return ignore;
 }
 
-static void cpufreq_alucard_timer(unsigned long data)
+static void cpufreq_darkness_timer(unsigned long data)
 {
 	bool ignore = false;
-	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, data);
-	struct cpufreq_alucard_tunables *tunables =
+	struct cpufreq_darkness_policyinfo *ppol = per_cpu(polinfo, data);
+#ifdef CONFIG_STATE_NOTIFIER
+	struct cpufreq_darkness_tunables *tunables =
 		ppol->policy->governor_data;
-	struct cpufreq_alucard_cpuinfo *pcpu;
-	unsigned int freq_responsiveness = tunables->freq_responsiveness;
-	int dec_cpu_load = tunables->dec_cpu_load;
-	int inc_cpu_load = tunables->inc_cpu_load;
-	int pump_inc_step = tunables->pump_inc_step;
-	int pump_dec_step = tunables->pump_dec_step;
-	unsigned int cpus_up_rate = tunables->cpus_up_rate;
-	unsigned int cpus_down_rate = tunables->cpus_down_rate;
-	unsigned int new_freq = 0;
+#endif
+	struct cpufreq_darkness_cpuinfo *pcpu;
+	unsigned int new_freq;
 	unsigned int max_load = 0, tmpload;
 	unsigned long flags;
 	unsigned long max_cpu;
@@ -332,13 +296,6 @@ static void cpufreq_alucard_timer(unsigned long data)
 				DEFAULT_TIMER_RATE_SUSP);
 	}
 #endif
-	/* CPUs Online Scale Frequency*/
-	if (ppol->policy->cur < freq_responsiveness) {
-		inc_cpu_load = tunables->inc_cpu_load_at_min_freq;
-		dec_cpu_load = tunables->dec_cpu_load_at_min_freq;
-		pump_inc_step = tunables->pump_inc_step_at_min_freq;
-		pump_dec_step = tunables->pump_dec_step_at_min_freq;
-	}
 
 	max_cpu = cpumask_first(ppol->policy->cpus);
 	for_each_cpu(i, ppol->policy->cpus) {
@@ -355,37 +312,7 @@ static void cpufreq_alucard_timer(unsigned long data)
 	}
 	spin_unlock(&ppol->load_lock);
 
-	/* Check for frequency increase or for frequency decrease */
-	if (max_load >= inc_cpu_load
-		 && ppol->policy->cur < ppol->policy->max) {
-		if (ppol->up_rate % cpus_up_rate == 0) {
-			new_freq = choose_target_freq(ppol,
-				pump_inc_step, true);
-			ppol->up_rate = 1;
-			ppol->down_rate = 1;
-		} else {
-			if (ppol->up_rate < cpus_up_rate)
-				++ppol->up_rate;
-			else
-				ppol->up_rate = 1;
-		}
-	} else if (max_load < dec_cpu_load
-				 && ppol->policy->cur > ppol->policy->min) {
-		if (ppol->down_rate % cpus_down_rate == 0) {
-			new_freq = choose_target_freq(ppol,
-				pump_dec_step, false);
-			ppol->up_rate = 1;
-			ppol->down_rate = 1;
-		} else {
-			if (ppol->down_rate < cpus_down_rate)
-				++ppol->down_rate;
-			else
-				ppol->down_rate = 1;
-		}
-	} else {
-		ppol->up_rate = 1;
-		ppol->down_rate = 1;
-	}
+	new_freq = choose_freq(ppol, max_load * (ppol->policy->max / 100));
 	if (!new_freq) {
 		spin_unlock_irqrestore(&ppol->target_freq_lock, flags);
 		goto rearm;
@@ -400,19 +327,19 @@ static void cpufreq_alucard_timer(unsigned long data)
 
 rearm:
 	if (!timer_pending(&ppol->policy_timer))
-		cpufreq_alucard_timer_resched(data, false);
+		cpufreq_darkness_timer_resched(data, false);
 
 exit:
 	up_read(&ppol->enable_sem);
 	return;
 }
 
-static int cpufreq_alucard_speedchange_task(void *data)
+static int cpufreq_darkness_speedchange_task(void *data)
 {
 	unsigned int cpu;
 	cpumask_t tmp_mask;
 	unsigned long flags;
-	struct cpufreq_alucard_policyinfo *ppol;
+	struct cpufreq_darkness_policyinfo *ppol;
 
 	while (1) {
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -455,11 +382,11 @@ static int cpufreq_alucard_speedchange_task(void *data)
 	return 0;
 }
 
-static int cpufreq_alucard_notifier(
+static int cpufreq_darkness_notifier(
 	struct notifier_block *nb, unsigned long val, void *data)
 {
 	struct cpufreq_freqs *freq = data;
-	struct cpufreq_alucard_policyinfo *ppol;
+	struct cpufreq_darkness_policyinfo *ppol;
 	int cpu;
 	unsigned long flags;
 
@@ -489,17 +416,17 @@ static int cpufreq_alucard_notifier(
 }
 
 static struct notifier_block cpufreq_notifier_block = {
-	.notifier_call = cpufreq_alucard_notifier,
+	.notifier_call = cpufreq_darkness_notifier,
 };
 
 #define show_store_one(file_name)					\
 static ssize_t show_##file_name(					\
-	struct cpufreq_alucard_tunables *tunables, char *buf)	\
+	struct cpufreq_darkness_tunables *tunables, char *buf)	\
 {									\
 	return snprintf(buf, PAGE_SIZE, "%u\n", tunables->file_name);	\
 }									\
 static ssize_t store_##file_name(					\
-		struct cpufreq_alucard_tunables *tunables,		\
+		struct cpufreq_darkness_tunables *tunables,		\
 		const char *buf, size_t count)				\
 {									\
 	int ret;							\
@@ -513,13 +440,13 @@ static ssize_t store_##file_name(					\
 }
 show_store_one(align_windows);
 
-static ssize_t show_timer_rate(struct cpufreq_alucard_tunables *tunables,
+static ssize_t show_timer_rate(struct cpufreq_darkness_tunables *tunables,
 		char *buf)
 {
 	return sprintf(buf, "%lu\n", tunables->timer_rate);
 }
 
-static ssize_t store_timer_rate(struct cpufreq_alucard_tunables *tunables,
+static ssize_t store_timer_rate(struct cpufreq_darkness_tunables *tunables,
 		const char *buf, size_t count)
 {
 	int ret;
@@ -541,13 +468,13 @@ static ssize_t store_timer_rate(struct cpufreq_alucard_tunables *tunables,
 	return count;
 }
 
-static ssize_t show_timer_slack(struct cpufreq_alucard_tunables *tunables,
+static ssize_t show_timer_slack(struct cpufreq_darkness_tunables *tunables,
 		char *buf)
 {
 	return sprintf(buf, "%d\n", tunables->timer_slack_val);
 }
 
-static ssize_t store_timer_slack(struct cpufreq_alucard_tunables *tunables,
+static ssize_t store_timer_slack(struct cpufreq_darkness_tunables *tunables,
 		const char *buf, size_t count)
 {
 	int ret;
@@ -561,13 +488,13 @@ static ssize_t store_timer_slack(struct cpufreq_alucard_tunables *tunables,
 	return count;
 }
 
-static ssize_t show_io_is_busy(struct cpufreq_alucard_tunables *tunables,
+static ssize_t show_io_is_busy(struct cpufreq_darkness_tunables *tunables,
 		char *buf)
 {
 	return sprintf(buf, "%u\n", tunables->io_is_busy);
 }
 
-static ssize_t store_io_is_busy(struct cpufreq_alucard_tunables *tunables,
+static ssize_t store_io_is_busy(struct cpufreq_darkness_tunables *tunables,
 		const char *buf, size_t count)
 {
 	int ret;
@@ -577,299 +504,6 @@ static ssize_t store_io_is_busy(struct cpufreq_alucard_tunables *tunables,
 	if (ret < 0)
 		return ret;
 	tunables->io_is_busy = val;
-
-	return count;
-}
-
-/* inc_cpu_load_at_min_freq */
-static ssize_t show_inc_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->inc_cpu_load_at_min_freq);
-}
-
-static ssize_t store_inc_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1) {
-		return -EINVAL;
-	}
-
-	input = min(input, tunables->inc_cpu_load);
-
-	if (input == tunables->inc_cpu_load_at_min_freq)
-		return count;
-
-	tunables->inc_cpu_load_at_min_freq = input;
-
-	return count;
-}
-
-/* inc_cpu_load */
-static ssize_t show_inc_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->inc_cpu_load);
-}
-
-static ssize_t store_inc_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = max(min(input, 100),0);
-
-	if (input == tunables->inc_cpu_load)
-		return count;
-
-	tunables->inc_cpu_load = input;
-
-	return count;
-}
-
-/* dec_cpu_load_at_min_freq */
-static ssize_t show_dec_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->dec_cpu_load_at_min_freq);
-}
-
-static ssize_t store_dec_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1) {
-		return -EINVAL;
-	}
-
-	input = min(input, tunables->dec_cpu_load);
-
-	if (input == tunables->dec_cpu_load_at_min_freq)
-		return count;
-
-	tunables->dec_cpu_load_at_min_freq = input;
-
-	return count;
-}
-
-/* dec_cpu_load */
-static ssize_t show_dec_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->dec_cpu_load);
-}
-
-static ssize_t store_dec_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = max(min(input, 95),5);
-
-	if (input == tunables->dec_cpu_load)
-		return count;
-
-	tunables->dec_cpu_load = input;
-
-	return count;
-}
-
-/* freq_responsiveness */
-static ssize_t show_freq_responsiveness(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->freq_responsiveness);
-}
-
-static ssize_t store_freq_responsiveness(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	if (input == tunables->freq_responsiveness)
-		return count;
-
-	tunables->freq_responsiveness = input;
-
-	return count;
-}
-
-/* cpus_up_rate */
-static ssize_t show_cpus_up_rate(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%u\n", tunables->cpus_up_rate);
-}
-
-static ssize_t store_cpus_up_rate(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	if (input == tunables->cpus_up_rate)
-		return count;
-
-	tunables->cpus_up_rate = input;
-
-	return count;
-}
-
-/* cpus_down_rate */
-static ssize_t show_cpus_down_rate(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%u\n", tunables->cpus_down_rate);
-}
-
-static ssize_t store_cpus_down_rate(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	if (input == tunables->cpus_down_rate)
-		return count;
-
-	tunables->cpus_down_rate = input;
-
-	return count;
-}
-
-/* pump_inc_step_at_min_freq */
-static ssize_t show_pump_inc_step_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->pump_inc_step_at_min_freq);
-}
-
-static ssize_t store_pump_inc_step_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = min(max(1, input), 6);
-
-	if (input == tunables->pump_inc_step_at_min_freq)
-		return count;
-
-	tunables->pump_inc_step_at_min_freq = input;
-
-	return count;
-}
-
-/* pump_inc_step */
-static ssize_t show_pump_inc_step(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->pump_inc_step);
-}
-
-static ssize_t store_pump_inc_step(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = min(max(1, input), 6);
-
-	if (input == tunables->pump_inc_step)
-		return count;
-
-	tunables->pump_inc_step = input;
-
-	return count;
-}
-
-/* pump_dec_step_at_min_freq */
-static ssize_t show_pump_dec_step_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->pump_dec_step_at_min_freq);
-}
-
-static ssize_t store_pump_dec_step_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = min(max(1, input), 6);
-
-	if (input == tunables->pump_dec_step_at_min_freq)
-		return count;
-
-	tunables->pump_dec_step_at_min_freq = input;
-
-	return count;
-}
-
-/* pump_dec_step */
-static ssize_t show_pump_dec_step(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->pump_dec_step);
-}
-
-static ssize_t store_pump_dec_step(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = min(max(1, input), 6);
-
-	if (input == tunables->pump_dec_step)
-		return count;
-
-	tunables->pump_dec_step = input;
 
 	return count;
 }
@@ -914,17 +548,6 @@ show_store_gov_pol_sys(timer_rate);
 show_store_gov_pol_sys(timer_slack);
 show_store_gov_pol_sys(io_is_busy);
 show_store_gov_pol_sys(align_windows);
-show_store_gov_pol_sys(inc_cpu_load_at_min_freq);
-show_store_gov_pol_sys(inc_cpu_load);
-show_store_gov_pol_sys(dec_cpu_load_at_min_freq);
-show_store_gov_pol_sys(dec_cpu_load);
-show_store_gov_pol_sys(freq_responsiveness);
-show_store_gov_pol_sys(cpus_up_rate);
-show_store_gov_pol_sys(cpus_down_rate);
-show_store_gov_pol_sys(pump_inc_step_at_min_freq);
-show_store_gov_pol_sys(pump_inc_step);
-show_store_gov_pol_sys(pump_dec_step_at_min_freq);
-show_store_gov_pol_sys(pump_dec_step);
 
 #define gov_sys_attr_rw(_name)						\
 static struct global_attr _name##_gov_sys =				\
@@ -942,84 +565,51 @@ gov_sys_pol_attr_rw(timer_rate);
 gov_sys_pol_attr_rw(timer_slack);
 gov_sys_pol_attr_rw(io_is_busy);
 gov_sys_pol_attr_rw(align_windows);
-gov_sys_pol_attr_rw(inc_cpu_load_at_min_freq);
-gov_sys_pol_attr_rw(inc_cpu_load);
-gov_sys_pol_attr_rw(dec_cpu_load_at_min_freq);
-gov_sys_pol_attr_rw(dec_cpu_load);
-gov_sys_pol_attr_rw(freq_responsiveness);
-gov_sys_pol_attr_rw(cpus_up_rate);
-gov_sys_pol_attr_rw(cpus_down_rate);
-gov_sys_pol_attr_rw(pump_inc_step_at_min_freq);
-gov_sys_pol_attr_rw(pump_inc_step);
-gov_sys_pol_attr_rw(pump_dec_step_at_min_freq);
-gov_sys_pol_attr_rw(pump_dec_step);
 
 /* One Governor instance for entire system */
-static struct attribute *alucard_attributes_gov_sys[] = {
+static struct attribute *darkness_attributes_gov_sys[] = {
 	&timer_rate_gov_sys.attr,
 	&timer_slack_gov_sys.attr,
 	&io_is_busy_gov_sys.attr,
 	&align_windows_gov_sys.attr,
-	&inc_cpu_load_at_min_freq_gov_sys.attr,
-	&inc_cpu_load_gov_sys.attr,
-	&dec_cpu_load_at_min_freq_gov_sys.attr,
-	&dec_cpu_load_gov_sys.attr,
-	&freq_responsiveness_gov_sys.attr,
-	&cpus_up_rate_gov_sys.attr,
-	&cpus_down_rate_gov_sys.attr,
-	&pump_inc_step_at_min_freq_gov_sys.attr,
-	&pump_inc_step_gov_sys.attr,
-	&pump_dec_step_at_min_freq_gov_sys.attr,
-	&pump_dec_step_gov_sys.attr,
 	NULL,
 };
 
-static struct attribute_group alucard_attr_group_gov_sys = {
-	.attrs = alucard_attributes_gov_sys,
-	.name = "alucard",
+static struct attribute_group darkness_attr_group_gov_sys = {
+	.attrs = darkness_attributes_gov_sys,
+	.name = "darkness",
 };
 
 /* Per policy governor instance */
-static struct attribute *alucard_attributes_gov_pol[] = {
+static struct attribute *darkness_attributes_gov_pol[] = {
 	&timer_rate_gov_pol.attr,
 	&timer_slack_gov_pol.attr,
 	&io_is_busy_gov_pol.attr,
 	&align_windows_gov_pol.attr,
-	&inc_cpu_load_at_min_freq_gov_pol.attr,
-	&inc_cpu_load_gov_pol.attr,
-	&dec_cpu_load_at_min_freq_gov_pol.attr,
-	&dec_cpu_load_gov_pol.attr,
-	&freq_responsiveness_gov_pol.attr,
-	&cpus_up_rate_gov_pol.attr,
-	&cpus_down_rate_gov_pol.attr,
-	&pump_inc_step_at_min_freq_gov_pol.attr,
-	&pump_inc_step_gov_pol.attr,
-	&pump_dec_step_at_min_freq_gov_pol.attr,
-	&pump_dec_step_gov_pol.attr,
 	NULL,
 };
 
-static struct attribute_group alucard_attr_group_gov_pol = {
-	.attrs = alucard_attributes_gov_pol,
-	.name = "alucard",
+static struct attribute_group darkness_attr_group_gov_pol = {
+	.attrs = darkness_attributes_gov_pol,
+	.name = "darkness",
 };
 
 static struct attribute_group *get_sysfs_attr(void)
 {
 	if (have_governor_per_policy())
-		return &alucard_attr_group_gov_pol;
+		return &darkness_attr_group_gov_pol;
 	else
-		return &alucard_attr_group_gov_sys;
+		return &darkness_attr_group_gov_sys;
 }
 
-static void cpufreq_alucard_nop_timer(unsigned long data)
+static void cpufreq_darkness_nop_timer(unsigned long data)
 {
 }
 
-static struct cpufreq_alucard_tunables *alloc_tunable(
+static struct cpufreq_darkness_tunables *alloc_tunable(
 					struct cpufreq_policy *policy)
 {
-	struct cpufreq_alucard_tunables *tunables;
+	struct cpufreq_darkness_tunables *tunables;
 
 	tunables = kzalloc(sizeof(*tunables), GFP_KERNEL);
 	if (!tunables)
@@ -1030,25 +620,14 @@ static struct cpufreq_alucard_tunables *alloc_tunable(
 	tunables->timer_rate_prev = DEFAULT_TIMER_RATE;
 #endif
 	tunables->timer_slack_val = DEFAULT_TIMER_SLACK;
-	tunables->inc_cpu_load_at_min_freq = INC_CPU_LOAD_AT_MIN_FREQ;
-	tunables->inc_cpu_load = INC_CPU_LOAD;
-	tunables->dec_cpu_load_at_min_freq = DEC_CPU_LOAD_AT_MIN_FREQ;
-	tunables->dec_cpu_load = DEC_CPU_LOAD;
-	tunables->freq_responsiveness = FREQ_RESPONSIVENESS;
-	tunables->cpus_up_rate = CPUS_UP_RATE;
-	tunables->cpus_down_rate = CPUS_DOWN_RATE;
-	tunables->pump_inc_step_at_min_freq = PUMP_INC_STEP_AT_MIN_FREQ;
-	tunables->pump_inc_step = PUMP_INC_STEP;
-	tunables->pump_dec_step = PUMP_DEC_STEP;
-	tunables->pump_dec_step_at_min_freq = PUMP_DEC_STEP_AT_MIN_FREQ;
 
 	return tunables;
 }
 
-static struct cpufreq_alucard_policyinfo *get_policyinfo(
+static struct cpufreq_darkness_policyinfo *get_policyinfo(
 					struct cpufreq_policy *policy)
 {
-	struct cpufreq_alucard_policyinfo *ppol =
+	struct cpufreq_darkness_policyinfo *ppol =
 				per_cpu(polinfo, policy->cpu);
 	int i;
 	unsigned long *busy;
@@ -1070,9 +649,9 @@ static struct cpufreq_alucard_policyinfo *get_policyinfo(
 	ppol->cpu_busy_times = busy;
 
 	init_timer_deferrable(&ppol->policy_timer);
-	ppol->policy_timer.function = cpufreq_alucard_timer;
+	ppol->policy_timer.function = cpufreq_darkness_timer;
 	init_timer(&ppol->policy_slack_timer);
-	ppol->policy_slack_timer.function = cpufreq_alucard_nop_timer;
+	ppol->policy_slack_timer.function = cpufreq_darkness_nop_timer;
 	spin_lock_init(&ppol->load_lock);
 	spin_lock_init(&ppol->target_freq_lock);
 	init_rwsem(&ppol->enable_sem);
@@ -1085,7 +664,7 @@ static struct cpufreq_alucard_policyinfo *get_policyinfo(
 /* This function is not multithread-safe. */
 static void free_policyinfo(int cpu)
 {
-	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
+	struct cpufreq_darkness_policyinfo *ppol = per_cpu(polinfo, cpu);
 	int j;
 
 	if (!ppol)
@@ -1099,8 +678,8 @@ static void free_policyinfo(int cpu)
 	kfree(ppol);
 }
 
-static struct cpufreq_alucard_tunables *get_tunables(
-				struct cpufreq_alucard_policyinfo *ppol)
+static struct cpufreq_darkness_tunables *get_tunables(
+				struct cpufreq_darkness_policyinfo *ppol)
 {
 	if (have_governor_per_policy())
 		return ppol->cached_tunables;
@@ -1108,13 +687,13 @@ static struct cpufreq_alucard_tunables *get_tunables(
 		return cached_common_tunables;
 }
 
-static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
+static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 		unsigned int event)
 {
 	int rc;
-	struct cpufreq_alucard_policyinfo *ppol;
+	struct cpufreq_darkness_policyinfo *ppol;
 	struct cpufreq_frequency_table *freq_table;
-	struct cpufreq_alucard_tunables *tunables;
+	struct cpufreq_darkness_tunables *tunables;
 	unsigned long flags;
 
 	if (have_governor_per_policy())
@@ -1203,15 +782,13 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 		ppol->target_freq = policy->cur;
 		ppol->freq_table = freq_table;
 		ppol->min_freq = policy->min;
-		ppol->up_rate = 1;
-		ppol->down_rate = 1;
 		ppol->reject_notification = true;
 		down_write(&ppol->enable_sem);
 		del_timer_sync(&ppol->policy_timer);
 		del_timer_sync(&ppol->policy_slack_timer);
 		ppol->policy_timer.data = policy->cpu;
 		ppol->last_evaluated_jiffy = get_jiffies_64();
-		cpufreq_alucard_timer_start(tunables, policy->cpu);
+		cpufreq_darkness_timer_start(tunables, policy->cpu);
 		ppol->governor_enabled = 1;
 		up_write(&ppol->enable_sem);
 		ppol->reject_notification = false;
@@ -1251,7 +828,7 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 			spin_unlock_irqrestore(&ppol->target_freq_lock, flags);
 
 			if (policy->min < ppol->min_freq)
-				cpufreq_alucard_timer_resched(policy->cpu,
+				cpufreq_darkness_timer_resched(policy->cpu,
 								  true);
 			ppol->min_freq = policy->min;
 		}
@@ -1263,25 +840,25 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 	return 0;
 }
 
-#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_ALUCARD
+#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_DARKNESS
 static
 #endif
-struct cpufreq_governor cpufreq_gov_alucard = {
-	.name = "alucard",
-	.governor = cpufreq_governor_alucard,
+struct cpufreq_governor cpufreq_gov_darkness = {
+	.name = "darkness",
+	.governor = cpufreq_governor_darkness,
 	.max_transition_latency = 10000000,
 	.owner = THIS_MODULE,
 };
 
-static int __init cpufreq_alucard_init(void)
+static int __init cpufreq_darkness_init(void)
 {
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
 	spin_lock_init(&speedchange_cpumask_lock);
 	mutex_init(&gov_lock);
 	speedchange_task =
-		kthread_create(cpufreq_alucard_speedchange_task, NULL,
-			       "cfalucard");
+		kthread_create(cpufreq_darkness_speedchange_task, NULL,
+			       "cfdarkness");
 	if (IS_ERR(speedchange_task))
 		return PTR_ERR(speedchange_task);
 
@@ -1291,20 +868,20 @@ static int __init cpufreq_alucard_init(void)
 	/* NB: wake up so the thread does not look hung to the freezer */
 	wake_up_process_no_notif(speedchange_task);
 
-	return cpufreq_register_governor(&cpufreq_gov_alucard);
+	return cpufreq_register_governor(&cpufreq_gov_darkness);
 }
 
-#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_ALUCARD
-fs_initcall(cpufreq_alucard_init);
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_DARKNESS
+fs_initcall(cpufreq_darkness_init);
 #else
-module_init(cpufreq_alucard_init);
+module_init(cpufreq_darkness_init);
 #endif
 
-static void __exit cpufreq_alucard_exit(void)
+static void __exit cpufreq_darkness_exit(void)
 {
 	int cpu;
 
-	cpufreq_unregister_governor(&cpufreq_gov_alucard);
+	cpufreq_unregister_governor(&cpufreq_gov_darkness);
 	kthread_stop(speedchange_task);
 	put_task_struct(speedchange_task);
 
@@ -1312,8 +889,8 @@ static void __exit cpufreq_alucard_exit(void)
 		free_policyinfo(cpu);
 }
 
-module_exit(cpufreq_alucard_exit);
+module_exit(cpufreq_darkness_exit);
 
 MODULE_AUTHOR("Alucard24 <dmbaoh2@gmail.com>");
-MODULE_DESCRIPTION("'cpufreq_alucard' - A dynamic cpufreq governor v5.0");
+MODULE_DESCRIPTION("'cpufreq_darkness' - A dynamic cpufreq governor v7.0");
 MODULE_LICENSE("GPLv2");
