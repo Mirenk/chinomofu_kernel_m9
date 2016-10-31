@@ -269,7 +269,7 @@ static void cpufreq_darkness_timer(unsigned long data)
 #endif
 	struct cpufreq_darkness_cpuinfo *pcpu;
 	unsigned int new_freq;
-	unsigned int max_load = 0, tmpload;
+	unsigned int max_load = 0;
 	unsigned long flags;
 	unsigned long max_cpu;
 	int i, fcpu;
@@ -303,10 +303,9 @@ static void cpufreq_darkness_timer(unsigned long data)
 		ignore = update_load(i);
 		if (ignore)
 			continue;
-		tmpload = pcpu->load;
 
-		if (tmpload > max_load) {
-			max_load = tmpload;
+		if (pcpu->load > max_load) {
+			max_load = pcpu->load;
 			max_cpu = i;
 		}
 	}
