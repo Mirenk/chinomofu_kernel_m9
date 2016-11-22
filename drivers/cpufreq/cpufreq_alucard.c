@@ -65,14 +65,12 @@ static struct mutex gov_lock;
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
 #define DEFAULT_TIMER_RATE_SUSP ((unsigned long)(50 * USEC_PER_MSEC))
 
-#define FREQ_RESPONSIVENESS			1248000
+#define FREQ_RESPONSIVENESS			1113600
+#define FREQ_RESPONSIVENESS_MAX		1324800
+#define FREQ_RESPONSIVENESS_MAX_BIGC		1920000
 
 #define CPUS_DOWN_RATE				1
 #define CPUS_UP_RATE				1
-#define DEC_CPU_LOAD				60
-#define DEC_CPU_LOAD_AT_MIN_FREQ	60
-#define INC_CPU_LOAD				80
-#define INC_CPU_LOAD_AT_MIN_FREQ	60
 
 #define PUMP_INC_STEP_AT_MIN_FREQ	2
 #define PUMP_INC_STEP				1
@@ -102,12 +100,11 @@ struct cpufreq_alucard_tunables {
 	/*
 	 * CPUs frequency scaling
 	 */
-	int inc_cpu_load_at_min_freq;
-	int inc_cpu_load;
-	int dec_cpu_load_at_min_freq;
-	int dec_cpu_load;
 	int freq_responsiveness;
+	int freq_responsiveness_max;
+	unsigned int cpus_up_rate_at_max_freq;
 	unsigned int cpus_up_rate;
+	unsigned int cpus_down_rate_at_max_freq;
 	unsigned int cpus_down_rate;
 	int pump_inc_step;
 	int pump_inc_step_at_min_freq;
@@ -212,8 +209,8 @@ static unsigned int choose_target_freq(struct cpufreq_alucard_policyinfo *pcpu,
 	struct cpufreq_policy *policy = pcpu->policy;
 	struct cpufreq_frequency_table *table = pcpu->freq_table;
 	struct cpufreq_frequency_table *pos;
-	unsigned int i = 0, target_freq = 0, freq;
-	int count = 0;
+	unsigned int target_freq = 0, freq;
+	int i = 0, t = 0;
 
 	if (!policy || !table || !step)
 		return 0;
@@ -224,19 +221,21 @@ static unsigned int choose_target_freq(struct cpufreq_alucard_policyinfo *pcpu,
 		if (isup) {
 			if (freq > policy->cur) {
 				target_freq = freq;
-				count++;
-				if (count == step)
+				step--;
+				if (step == 0) {
 					break;
+				}
 			}
 		} else {
 			if (freq == policy->cur) {
-				for (count = (i - 1); count >= 0; count--) {
-					if (table[count].frequency != CPUFREQ_ENTRY_INVALID) {
-						target_freq = table[count].frequency;
+				for (t = (i - 1); t >= 0; t--) {
+					if (table[t].frequency != CPUFREQ_ENTRY_INVALID) {
+						target_freq = table[t].frequency;
 						step--;
+						if (step == 0) {
+							break;
+						}
 					}
-					if (step == 0)
-						break;
 				}
 				break;
 			}
@@ -252,7 +251,6 @@ static bool update_load(int cpu)
 	struct cpufreq_alucard_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
 	struct cpufreq_alucard_tunables *tunables =
 		ppol->policy->governor_data;
-	struct cpufreq_govinfo govinfo;
 	u64 now;
 	u64 now_idle;
 	unsigned int delta_idle;
@@ -265,41 +263,29 @@ static bool update_load(int cpu)
 
 	WARN_ON_ONCE(!delta_time);
 
-	if (delta_time <= delta_idle) {
+	if (delta_time < delta_idle) {
 		pcpu->load = 0;
 		ignore = true;
 	} else {
-		pcpu->load = 100 * (delta_time - delta_idle) / delta_time;
+		pcpu->load = 100 * (delta_time - delta_idle);
+		do_div(pcpu->load, delta_time);
 	}
 	pcpu->time_in_idle = now_idle;
 	pcpu->time_in_idle_timestamp = now;
-
-	/*
-	 * Send govinfo notification.
-	 * Govinfo notification could potentially wake up another thread
-	 * managed by its clients. Thread wakeups might trigger a load
-	 * change callback that executes this function again. Therefore
-	 * no spinlock could be held when sending the notification.
-	 */
-	govinfo.cpu = cpu;
-	govinfo.load = pcpu->load;
-	govinfo.sampling_rate_us = tunables->timer_rate;
-	atomic_notifier_call_chain(&cpufreq_govinfo_notifier_list,
-					   CPUFREQ_LOAD_CHANGE, &govinfo);
 
 	return ignore;
 }
 
 static void cpufreq_alucard_timer(unsigned long data)
 {
-	bool ignore = false;
 	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, data);
 	struct cpufreq_alucard_tunables *tunables =
 		ppol->policy->governor_data;
 	struct cpufreq_alucard_cpuinfo *pcpu;
+	struct cpufreq_govinfo govinfo;
 	unsigned int freq_responsiveness = tunables->freq_responsiveness;
-	int dec_cpu_load = tunables->dec_cpu_load;
-	int inc_cpu_load = tunables->inc_cpu_load;
+	unsigned int freq_responsiveness_max = tunables->freq_responsiveness_max;
+	int target_cpu_load;
 	int pump_inc_step = tunables->pump_inc_step;
 	int pump_dec_step = tunables->pump_dec_step;
 	unsigned int cpus_up_rate = tunables->cpus_up_rate;
@@ -315,9 +301,8 @@ static void cpufreq_alucard_timer(unsigned long data)
 	if (!ppol->governor_enabled)
 		goto exit;
 
-	spin_lock_irqsave(&ppol->target_freq_lock, flags);
-	spin_lock(&ppol->load_lock);
 	fcpu = cpumask_first(ppol->policy->related_cpus);
+	spin_lock_irqsave(&ppol->load_lock, flags);
 	ppol->last_evaluated_jiffy = get_jiffies_64();
 
 #ifdef CONFIG_STATE_NOTIFIER
@@ -333,18 +318,24 @@ static void cpufreq_alucard_timer(unsigned long data)
 	}
 #endif
 	/* CPUs Online Scale Frequency*/
+	target_cpu_load = (ppol->policy->cur * 100) / ppol->policy->max;
 	if (ppol->policy->cur < freq_responsiveness) {
-		inc_cpu_load = tunables->inc_cpu_load_at_min_freq;
-		dec_cpu_load = tunables->dec_cpu_load_at_min_freq;
 		pump_inc_step = tunables->pump_inc_step_at_min_freq;
 		pump_dec_step = tunables->pump_dec_step_at_min_freq;
+	} else if (ppol->policy->cur > freq_responsiveness_max) {
+		cpus_up_rate = tunables->cpus_up_rate_at_max_freq;
+		cpus_down_rate = tunables->cpus_down_rate_at_max_freq;
 	}
+	if (ppol->up_rate > cpus_up_rate)
+		ppol->up_rate = 1;
+	if (ppol->down_rate > cpus_down_rate)
+		ppol->down_rate = 1;
+	
 
 	max_cpu = cpumask_first(ppol->policy->cpus);
 	for_each_cpu(i, ppol->policy->cpus) {
 		pcpu = &per_cpu(cpuinfo, i);
-		ignore = update_load(i);
-		if (ignore)
+		if (update_load(i))
 			continue;
 
 		if (pcpu->load > max_load) {
@@ -352,34 +343,41 @@ static void cpufreq_alucard_timer(unsigned long data)
 			max_cpu = i;
 		}
 	}
-	spin_unlock(&ppol->load_lock);
+	spin_unlock_irqrestore(&ppol->load_lock, flags);
+
+	/*
+	 * Send govinfo notification.
+	 * Govinfo notification could potentially wake up another thread
+	 * managed by its clients. Thread wakeups might trigger a load
+	 * change callback that executes this function again. Therefore
+	 * no spinlock could be held when sending the notification.
+	 */
+	for_each_cpu(i, ppol->policy->cpus) {
+		pcpu = &per_cpu(cpuinfo, i);
+		govinfo.cpu = i;
+		govinfo.load = pcpu->load;
+		govinfo.sampling_rate_us = tunables->timer_rate;
+		atomic_notifier_call_chain(&cpufreq_govinfo_notifier_list,
+					   CPUFREQ_LOAD_CHANGE, &govinfo);
+	}
 
 	/* Check for frequency increase or for frequency decrease */
-	if (max_load >= inc_cpu_load
+	spin_lock_irqsave(&ppol->target_freq_lock, flags);
+	if (max_load >= target_cpu_load
 		 && ppol->policy->cur < ppol->policy->max) {
 		if (ppol->up_rate % cpus_up_rate == 0) {
 			new_freq = choose_target_freq(ppol,
 				pump_inc_step, true);
-			ppol->up_rate = 1;
-			ppol->down_rate = 1;
 		} else {
-			if (ppol->up_rate < cpus_up_rate)
-				++ppol->up_rate;
-			else
-				ppol->up_rate = 1;
+			++ppol->up_rate;
 		}
-	} else if (max_load < dec_cpu_load
+	} else if (max_load < target_cpu_load
 				 && ppol->policy->cur > ppol->policy->min) {
 		if (ppol->down_rate % cpus_down_rate == 0) {
 			new_freq = choose_target_freq(ppol,
 				pump_dec_step, false);
-			ppol->up_rate = 1;
-			ppol->down_rate = 1;
 		} else {
-			if (ppol->down_rate < cpus_down_rate)
-				++ppol->down_rate;
-			else
-				ppol->down_rate = 1;
+			++ppol->down_rate;
 		}
 	} else {
 		ppol->up_rate = 1;
@@ -481,6 +479,10 @@ static int cpufreq_alucard_notifier(
 		for_each_cpu(cpu, ppol->policy->cpus)
 			update_load(cpu);
 		spin_unlock_irqrestore(&ppol->load_lock, flags);
+		spin_lock_irqsave(&ppol->target_freq_lock, flags);
+		ppol->up_rate = 1;
+		ppol->down_rate = 1;
+		spin_unlock_irqrestore(&ppol->target_freq_lock, flags);
 
 		up_read(&ppol->enable_sem);
 	}
@@ -580,116 +582,6 @@ static ssize_t store_io_is_busy(struct cpufreq_alucard_tunables *tunables,
 	return count;
 }
 
-/* inc_cpu_load_at_min_freq */
-static ssize_t show_inc_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->inc_cpu_load_at_min_freq);
-}
-
-static ssize_t store_inc_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1) {
-		return -EINVAL;
-	}
-
-	input = min(input, tunables->inc_cpu_load);
-
-	if (input == tunables->inc_cpu_load_at_min_freq)
-		return count;
-
-	tunables->inc_cpu_load_at_min_freq = input;
-
-	return count;
-}
-
-/* inc_cpu_load */
-static ssize_t show_inc_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->inc_cpu_load);
-}
-
-static ssize_t store_inc_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = max(min(input, 100),0);
-
-	if (input == tunables->inc_cpu_load)
-		return count;
-
-	tunables->inc_cpu_load = input;
-
-	return count;
-}
-
-/* dec_cpu_load_at_min_freq */
-static ssize_t show_dec_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->dec_cpu_load_at_min_freq);
-}
-
-static ssize_t store_dec_cpu_load_at_min_freq(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1) {
-		return -EINVAL;
-	}
-
-	input = min(input, tunables->dec_cpu_load);
-
-	if (input == tunables->dec_cpu_load_at_min_freq)
-		return count;
-
-	tunables->dec_cpu_load_at_min_freq = input;
-
-	return count;
-}
-
-/* dec_cpu_load */
-static ssize_t show_dec_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		char *buf)
-{
-	return sprintf(buf, "%d\n", tunables->dec_cpu_load);
-}
-
-static ssize_t store_dec_cpu_load(struct cpufreq_alucard_tunables *tunables,
-		const char *buf, size_t count)
-{
-	int input;
-	int ret;
-
-	ret = sscanf(buf, "%d", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	input = max(min(input, 95),5);
-
-	if (input == tunables->dec_cpu_load)
-		return count;
-
-	tunables->dec_cpu_load = input;
-
-	return count;
-}
-
 /* freq_responsiveness */
 static ssize_t show_freq_responsiveness(struct cpufreq_alucard_tunables *tunables,
 		char *buf)
@@ -714,6 +606,32 @@ static ssize_t store_freq_responsiveness(struct cpufreq_alucard_tunables *tunabl
 
 	return count;
 }
+
+/* freq_responsiveness_max */
+static ssize_t show_freq_responsiveness_max(struct cpufreq_alucard_tunables *tunables,
+		char *buf)
+{
+	return sprintf(buf, "%d\n", tunables->freq_responsiveness_max);
+}
+
+static ssize_t store_freq_responsiveness_max(struct cpufreq_alucard_tunables *tunables,
+		const char *buf, size_t count)
+{
+	int input;
+	int ret;
+
+	ret = sscanf(buf, "%d", &input);
+	if (ret != 1)
+		return -EINVAL;
+
+	if (input == tunables->freq_responsiveness_max)
+		return count;
+
+	tunables->freq_responsiveness_max = input;
+
+	return count;
+}
+
 
 /* cpus_up_rate */
 static ssize_t show_cpus_up_rate(struct cpufreq_alucard_tunables *tunables,
@@ -740,6 +658,31 @@ static ssize_t store_cpus_up_rate(struct cpufreq_alucard_tunables *tunables,
 	return count;
 }
 
+/* cpus_up_rate_at_max_freq */
+static ssize_t show_cpus_up_rate_at_max_freq(struct cpufreq_alucard_tunables *tunables,
+		char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->cpus_up_rate_at_max_freq);
+}
+
+static ssize_t store_cpus_up_rate_at_max_freq(struct cpufreq_alucard_tunables *tunables,
+		const char *buf, size_t count)
+{
+	unsigned int input;
+	int ret;
+
+	ret = sscanf(buf, "%u", &input);
+	if (ret != 1)
+		return -EINVAL;
+
+	if (input == tunables->cpus_up_rate_at_max_freq)
+		return count;
+
+	tunables->cpus_up_rate_at_max_freq = input;
+
+	return count;
+}
+
 /* cpus_down_rate */
 static ssize_t show_cpus_down_rate(struct cpufreq_alucard_tunables *tunables,
 		char *buf)
@@ -761,6 +704,31 @@ static ssize_t store_cpus_down_rate(struct cpufreq_alucard_tunables *tunables,
 		return count;
 
 	tunables->cpus_down_rate = input;
+
+	return count;
+}
+
+/* cpus_down_rate_at_max_freq */
+static ssize_t show_cpus_down_rate_at_max_freq(struct cpufreq_alucard_tunables *tunables,
+		char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->cpus_down_rate_at_max_freq);
+}
+
+static ssize_t store_cpus_down_rate_at_max_freq(struct cpufreq_alucard_tunables *tunables,
+		const char *buf, size_t count)
+{
+	unsigned int input;
+	int ret;
+
+	ret = sscanf(buf, "%u", &input);
+	if (ret != 1)
+		return -EINVAL;
+
+	if (input == tunables->cpus_down_rate_at_max_freq)
+		return count;
+
+	tunables->cpus_down_rate_at_max_freq = input;
 
 	return count;
 }
@@ -913,12 +881,11 @@ show_store_gov_pol_sys(timer_rate);
 show_store_gov_pol_sys(timer_slack);
 show_store_gov_pol_sys(io_is_busy);
 show_store_gov_pol_sys(align_windows);
-show_store_gov_pol_sys(inc_cpu_load_at_min_freq);
-show_store_gov_pol_sys(inc_cpu_load);
-show_store_gov_pol_sys(dec_cpu_load_at_min_freq);
-show_store_gov_pol_sys(dec_cpu_load);
 show_store_gov_pol_sys(freq_responsiveness);
+show_store_gov_pol_sys(freq_responsiveness_max);
+show_store_gov_pol_sys(cpus_up_rate_at_max_freq);
 show_store_gov_pol_sys(cpus_up_rate);
+show_store_gov_pol_sys(cpus_down_rate_at_max_freq);
 show_store_gov_pol_sys(cpus_down_rate);
 show_store_gov_pol_sys(pump_inc_step_at_min_freq);
 show_store_gov_pol_sys(pump_inc_step);
@@ -941,12 +908,11 @@ gov_sys_pol_attr_rw(timer_rate);
 gov_sys_pol_attr_rw(timer_slack);
 gov_sys_pol_attr_rw(io_is_busy);
 gov_sys_pol_attr_rw(align_windows);
-gov_sys_pol_attr_rw(inc_cpu_load_at_min_freq);
-gov_sys_pol_attr_rw(inc_cpu_load);
-gov_sys_pol_attr_rw(dec_cpu_load_at_min_freq);
-gov_sys_pol_attr_rw(dec_cpu_load);
 gov_sys_pol_attr_rw(freq_responsiveness);
+gov_sys_pol_attr_rw(freq_responsiveness_max);
+gov_sys_pol_attr_rw(cpus_up_rate_at_max_freq);
 gov_sys_pol_attr_rw(cpus_up_rate);
+gov_sys_pol_attr_rw(cpus_down_rate_at_max_freq);
 gov_sys_pol_attr_rw(cpus_down_rate);
 gov_sys_pol_attr_rw(pump_inc_step_at_min_freq);
 gov_sys_pol_attr_rw(pump_inc_step);
@@ -959,12 +925,11 @@ static struct attribute *alucard_attributes_gov_sys[] = {
 	&timer_slack_gov_sys.attr,
 	&io_is_busy_gov_sys.attr,
 	&align_windows_gov_sys.attr,
-	&inc_cpu_load_at_min_freq_gov_sys.attr,
-	&inc_cpu_load_gov_sys.attr,
-	&dec_cpu_load_at_min_freq_gov_sys.attr,
-	&dec_cpu_load_gov_sys.attr,
 	&freq_responsiveness_gov_sys.attr,
+	&freq_responsiveness_max_gov_sys.attr,
+	&cpus_up_rate_at_max_freq_gov_sys.attr,
 	&cpus_up_rate_gov_sys.attr,
+	&cpus_down_rate_at_max_freq_gov_sys.attr,
 	&cpus_down_rate_gov_sys.attr,
 	&pump_inc_step_at_min_freq_gov_sys.attr,
 	&pump_inc_step_gov_sys.attr,
@@ -984,12 +949,11 @@ static struct attribute *alucard_attributes_gov_pol[] = {
 	&timer_slack_gov_pol.attr,
 	&io_is_busy_gov_pol.attr,
 	&align_windows_gov_pol.attr,
-	&inc_cpu_load_at_min_freq_gov_pol.attr,
-	&inc_cpu_load_gov_pol.attr,
-	&dec_cpu_load_at_min_freq_gov_pol.attr,
-	&dec_cpu_load_gov_pol.attr,
 	&freq_responsiveness_gov_pol.attr,
+	&freq_responsiveness_max_gov_pol.attr,
+	&cpus_up_rate_at_max_freq_gov_pol.attr,
 	&cpus_up_rate_gov_pol.attr,
+	&cpus_down_rate_at_max_freq_gov_pol.attr,
 	&cpus_down_rate_gov_pol.attr,
 	&pump_inc_step_at_min_freq_gov_pol.attr,
 	&pump_inc_step_gov_pol.attr,
@@ -1029,12 +993,14 @@ static struct cpufreq_alucard_tunables *alloc_tunable(
 	tunables->timer_rate_prev = DEFAULT_TIMER_RATE;
 #endif
 	tunables->timer_slack_val = DEFAULT_TIMER_SLACK;
-	tunables->inc_cpu_load_at_min_freq = INC_CPU_LOAD_AT_MIN_FREQ;
-	tunables->inc_cpu_load = INC_CPU_LOAD;
-	tunables->dec_cpu_load_at_min_freq = DEC_CPU_LOAD_AT_MIN_FREQ;
-	tunables->dec_cpu_load = DEC_CPU_LOAD;
 	tunables->freq_responsiveness = FREQ_RESPONSIVENESS;
+	if (policy->cpu < 2)
+		tunables->freq_responsiveness_max = FREQ_RESPONSIVENESS_MAX;
+	else
+		tunables->freq_responsiveness_max = FREQ_RESPONSIVENESS_MAX_BIGC;
+	tunables->cpus_up_rate_at_max_freq = CPUS_UP_RATE;
 	tunables->cpus_up_rate = CPUS_UP_RATE;
+	tunables->cpus_down_rate_at_max_freq = CPUS_DOWN_RATE;
 	tunables->cpus_down_rate = CPUS_DOWN_RATE;
 	tunables->pump_inc_step_at_min_freq = PUMP_INC_STEP_AT_MIN_FREQ;
 	tunables->pump_inc_step = PUMP_INC_STEP;
