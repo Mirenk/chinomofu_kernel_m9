@@ -37,17 +37,19 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
 	struct ac_dbs_tuners *ac_tuners = dbs_data->tuners;
 	struct cpufreq_policy *policy;
+	unsigned int sampling_rate;
 	unsigned int max_load = 0;
 	unsigned int ignore_nice;
 	unsigned int j;
 
-	if (dbs_data->cdata->governor == GOV_ONDEMAND)
+	if (dbs_data->cdata->governor == GOV_ONDEMAND) {
 		ignore_nice = od_tuners->ignore_nice_load;
 	} else if (dbs_data->cdata->governor == GOV_ALUCARD) {
 		sampling_rate = ac_tuners->sampling_rate;
 		ignore_nice = ac_tuners->ignore_nice_load;
 	} else {
 		ignore_nice = cs_tuners->ignore_nice_load;
+	}
 
 	policy = cdbs->cur_policy;
 
