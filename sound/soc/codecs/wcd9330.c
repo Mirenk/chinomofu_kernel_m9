@@ -25,9 +25,6 @@
 #include <linux/mfd/wcd9xxx/wcd9330_registers.h>
 #include <linux/mfd/wcd9xxx/pdata.h>
 #include <linux/regulator/consumer.h>
-#include <linux/proc_fs.h>
-#include <../drivers/base/regmap/internal.h>
-#include <linux/switch.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -41,6 +38,9 @@
 #include "wcd9xxx-resmgr.h"
 #include "wcd9xxx-common.h"
 #include "wcdcal-hwdep.h"
+#include <linux/proc_fs.h>
+#include <../drivers/base/regmap/internal.h>
+#include <linux/switch.h>
 #include "wcd_cpe_core.h"
 
 enum {
@@ -84,8 +84,8 @@ enum {
 #define SLIM_BW_CLK_GEAR_9 6200000
 #define SLIM_BW_UNVOTE 0
 
-#define AUDIO_DEBUG_GPIO 25
-
+int g_DebugMode = 0;
+struct switch_dev *g_audiowizard_force_preset_sdev = NULL;
 static int cpe_debug_mode;
 module_param(cpe_debug_mode, int,
 	     S_IRUGO | S_IWUSR | S_IWGRP);
@@ -342,8 +342,9 @@ static struct afe_param_id_clip_bank_sel clip_bank_sel = {
 };
 
 #define WCD9330_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
-			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |\
-			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000)
+		        SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 |\
+                        SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |\
+			SNDRV_PCM_RATE_192000)
 
 #define NUM_DECIMATORS 10
 #define NUM_INTERPOLATORS 8
@@ -360,11 +361,13 @@ static struct afe_param_id_clip_bank_sel clip_bank_sel = {
 #define TOMTOM_MCLK_CLK_12P288MHZ 12288000
 #define TOMTOM_MCLK_CLK_9P6MHZ 9600000
 
-#define TOMTOM_FORMATS_S16_S24_LE (SNDRV_PCM_FMTBIT_S16_LE | \
-			SNDRV_PCM_FORMAT_S24_LE | \
-			SNDRV_PCM_FMTBIT_S24_3LE)
+#define TOMTOM_FORMATS_S16_S24_LE (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FORMAT_S16_LE |\
+			SNDRV_PCM_FORMAT_S24_LE | SNDRV_PCM_FMTBIT_S24_LE |\
+			SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FORMAT_S24_LE)
 
-#define TOMTOM_FORMATS (SNDRV_PCM_FMTBIT_S16_LE)
+#define TOMTOM_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FORMAT_S16_LE |\
+			SNDRV_PCM_FORMAT_S24_LE | SNDRV_PCM_FMTBIT_S24_LE |\
+			SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FORMAT_S24_LE)
 
 #define TOMTOM_SLIM_PGD_PORT_INT_TX_EN0 (TOMTOM_SLIM_PGD_PORT_INT_EN0 + 2)
 #define TOMTOM_ZDET_BOX_CAR_AVG_LOOP_COUNT 1
@@ -712,10 +715,12 @@ static int tomtom_update_uhqa_mode(struct snd_soc_codec *codec, int path)
 	int ret = 0;
 	struct tomtom_priv *tomtom_p = snd_soc_codec_get_drvdata(codec);
 
-	
+
 	if (((tomtom_get_sample_rate(codec, path) & 0xE0) == 0xA0) &&
 		(tomtom_compare_bit_format(codec, 24))) {
 		tomtom_p->uhqa_mode = 1;
+        } else if ((tomtom_compare_bit_format(codec, 16))) {
+               tomtom_p->uhqa_mode = 1;
 	} else {
 		tomtom_p->uhqa_mode = 0;
 	}
@@ -5388,7 +5393,10 @@ static int tomtom_volatile(struct snd_soc_codec *ssc, unsigned int reg)
 	if ((reg >= TOMTOM_A_CDC_MBHC_EN_CTL) || (reg < 0x100))
 		return 1;
 
-	
+	if (reg == TOMTOM_A_CDC_CLK_RX_RESET_CTL)
+		return 1;
+
+	/* IIR Coeff registers are not cacheable */
 	if ((reg >= TOMTOM_A_CDC_IIR1_COEF_B1_CTL) &&
 		(reg <= TOMTOM_A_CDC_IIR2_COEF_B2_CTL))
 		return 1;
@@ -5429,6 +5437,9 @@ static int tomtom_volatile(struct snd_soc_codec *ssc, unsigned int reg)
 			return 1;
 
 	if (reg == TOMTOM_A_SVASS_SPE_INBOX_TRG)
+		return 1;
+
+	if (reg == TOMTOM_A_QFUSE_STATUS)
 		return 1;
 
 	return 0;
@@ -7614,7 +7625,7 @@ static const struct wcd9xxx_reg_mask_val tomtom_reg_defaults[] = {
 	TOMTOM_REG_VAL(TOMTOM_A_CDC_CLK_OTHR_CTL, 0x00),
 	TOMTOM_REG_VAL(TOMTOM_A_CDC_MAD_INP_SEL, 0x01),
 
-	
+	/* Set HPH Path to low power mode */
 	TOMTOM_REG_VAL(TOMTOM_A_RX_HPH_BIAS_PA, 0x57),
 
 	
@@ -7916,8 +7927,10 @@ int tomtom_hs_detect(struct snd_soc_codec *codec,
 		snd_soc_update_bits(codec, TOMTOM_A_MICB_CFILT_2_CTL, 0x01,
 				    0x00);
 		tomtom->mbhc.mbhc_cfg = NULL;
+		tomtom->mbhc_started = false;
 		rc = 0;
 	}
+	wcd9xxx_clsh_post_init(&tomtom->clsh_d, tomtom->mbhc_started);
 	return rc;
 }
 EXPORT_SYMBOL(tomtom_hs_detect);
@@ -8468,6 +8481,11 @@ static int tomtom_post_reset_cb(struct wcd9xxx *wcd9xxx)
 	codec = (struct snd_soc_codec *)(wcd9xxx->ssr_priv);
 	tomtom = snd_soc_codec_get_drvdata(codec);
 
+	/*
+	 * Delay is needed for settling time
+	 * for the register configuration
+	 */
+	msleep(75);
 	snd_soc_card_change_online_state(codec->card, 1);
 	clear_bit(BUS_DOWN, &tomtom->status_mask);
 
@@ -8815,9 +8833,11 @@ static int tomtom_codec_probe(struct snd_soc_codec *codec)
 	tomtom->micb_3_users = 0;
 	tomtom_update_reg_defaults(codec);
 	pr_debug("%s: MCLK Rate = %x\n", __func__, wcd9xxx->mclk_rate);
-	if (wcd9xxx->mclk_rate == TOMTOM_MCLK_CLK_12P288MHZ)
+	if (wcd9xxx->mclk_rate == TOMTOM_MCLK_CLK_12P288MHZ) {
 		snd_soc_update_bits(codec, TOMTOM_A_CHIP_CTL, 0x06, 0x0);
-	else if (wcd9xxx->mclk_rate == TOMTOM_MCLK_CLK_9P6MHZ)
+		snd_soc_update_bits(codec, TOMTOM_A_RX_COM_TIMER_DIV,
+				    0x01, 0x01);
+	} else if (wcd9xxx->mclk_rate == TOMTOM_MCLK_CLK_9P6MHZ)
 		snd_soc_update_bits(codec, TOMTOM_A_CHIP_CTL, 0x06, 0x2);
 	tomtom_codec_init_reg(codec);
 
@@ -8907,6 +8927,21 @@ static int tomtom_codec_probe(struct snd_soc_codec *codec)
 		
 		ret = 0;
 	}
+
+        /* ASUS_BSP Paul +++ */
+        if (!g_audiowizard_force_preset_sdev) {
+                g_audiowizard_force_preset_sdev = kzalloc(sizeof(struct switch_dev), GFP_KERNEL);
+                if (!g_audiowizard_force_preset_sdev) {
+                        pr_err("%s: failed to allocate switch_dev\n", __func__);
+                        ret = -ENOMEM;
+                }
+                g_audiowizard_force_preset_sdev->name = "audiowizard_force_preset";
+                g_audiowizard_force_preset_sdev->state = 0;
+                ret = switch_dev_register(g_audiowizard_force_preset_sdev);
+                if (ret < 0)
+                        pr_err("%s: failed to register switch audiowizard_force_preset\n", __func__);
+        }
+        /* ASUS_BSP Paul --- */
 	return ret;
 
 err_pdata:
@@ -8960,10 +8995,6 @@ static struct snd_soc_codec_driver soc_codec_dev_tomtom = {
 	.dapm_routes = audio_map,
 	.num_dapm_routes = ARRAY_SIZE(audio_map),
 };
-
-struct tomtom_priv *g_tasha;
-struct switch_dev *g_audiowizard_force_preset_sdev = NULL;
-struct snd_soc_codec *registered_codec;
 
 #ifdef CONFIG_PM
 static int tomtom_suspend(struct device *dev)
