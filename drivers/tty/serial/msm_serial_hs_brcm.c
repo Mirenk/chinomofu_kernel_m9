@@ -2111,11 +2111,11 @@ static int msm_hs_check_clock_off(struct uart_port *uport)
 		 * this only when wakeup irq is set.
 		 */
 		disable_irq(uport->irq);
-	
+	// [HTC_BT] +++
 	} else {
-		
+		// No wakeup_irq of Rx but still have to enable/disable uport->irq so XO could suspend
 		disable_irq(uport->irq);
-	
+	// [HTC_BT] ---
 	}
 	wake_unlock(&msm_uport->dma_wake_lock);
 
@@ -2321,11 +2321,11 @@ void msm_hs_request_clock_on(struct uart_port *uport)
 			disable_irq_nosync(msm_uport->wakeup.irq);
 			/* uport-irq was disabled when clocked off */
 			enable_irq(uport->irq);
-		
+		// [HTC_BT] +++
 		} else {
-			
+			// No wakeup_irq of Rx but still have to enable/disable uport->irq so XO could suspend
 			enable_irq(uport->irq);
-		
+		// [HTC_BT] ---
 		}
 		spin_unlock_irqrestore(&uport->lock, flags);
 		mutex_unlock(&msm_uport->clk_mutex);

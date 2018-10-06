@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/qcom_iommu.h>
 #include <linux/msm_iommu_domains.h>
+#include <linux/pm_qos.h>
 #include <media/msm_vidc.h>
 #include "msm_vidc_common.h"
 #include "msm_vidc_debug.h"
@@ -35,6 +36,7 @@
 #define BASE_DEVICE_NUMBER 32
 #define EARLY_FIRMWARE_LOAD_DELAY 1000
 
+static struct pm_qos_request msm_v4l2_vidc_pm_qos_request;
 struct msm_vidc_drv *vidc_driver;
 
 uint32_t msm_vidc_pwr_collapse_delay = 2000;
@@ -61,6 +63,11 @@ static int msm_v4l2_open(struct file *filp)
 		core->id, vid_dev->type);
 		return -ENOMEM;
 	}
+
+	dprintk(VIDC_DBG, "pm_qos_add with latency 1000usec\n");
+	pm_qos_add_request(&msm_v4l2_vidc_pm_qos_request,
+			PM_QOS_CPU_DMA_LATENCY, 1000);
+
 	clear_bit(V4L2_FL_USES_V4L2_FH, &vdev->flags);
 	filp->private_data = &(vidc_inst->event_handler);
 	trace_msm_v4l2_vidc_open_end("msm_v4l2_open end");
@@ -81,6 +88,12 @@ static int msm_v4l2_close(struct file *filp)
 			"Failed in %s for release output buffers\n", __func__);
 
 	rc = msm_vidc_close(vidc_inst);
+
+	dprintk(VIDC_DBG, "pm_qos_update and remove\n");
+	pm_qos_update_request(&msm_v4l2_vidc_pm_qos_request,
+			PM_QOS_DEFAULT_VALUE);
+	pm_qos_remove_request(&msm_v4l2_vidc_pm_qos_request);
+
 	trace_msm_v4l2_vidc_close_end("msm_v4l2_close end");
 	return rc;
 }
@@ -240,6 +253,30 @@ static int msm_v4l2_enum_framesizes(struct file *file, void *fh,
 	struct msm_vidc_inst *vidc_inst = get_vidc_inst(file, fh);
 	return msm_vidc_enum_framesizes((void *)vidc_inst, fsize);
 }
+/* HTC_START: Pass calling process id and name in kernel space */
+int msm_v4l2_htc_set_callingpid_name(struct file *file, void *fh,
+                                struct htc_callingpid_data *b)
+{
+   struct msm_vidc_inst *vidc_inst;
+   if (!b) {
+       dprintk(VIDC_ERR, "%s: Invalid input params\n",  __func__);
+       return -EINVAL;
+   }
+   vidc_inst = get_vidc_inst(file, fh);
+   if (!vidc_inst) {
+       dprintk(VIDC_ERR, "%s: Invalid vidc instance\n",  __func__);
+       return -EINVAL;
+   } else {
+       dprintk(VIDC_WARN,
+           "[Vidc_Pid][%p] Calling PID: %d, Name: %s\n",
+           vidc_inst, b->call_pid, b->process_name);
+   }
+   vidc_inst->call_pid = b->call_pid;
+   strncpy(vidc_inst->process_name, b->process_name, sizeof(vidc_inst->process_name));
+   vidc_inst->process_name[sizeof(vidc_inst->process_name)-1] = '\0';
+   return 0;
+}
+/* HTC_END */
 
 static const struct v4l2_ioctl_ops msm_v4l2_ioctl_ops = {
 	.vidioc_querycap = msm_v4l2_querycap,
@@ -265,6 +302,9 @@ static const struct v4l2_ioctl_ops msm_v4l2_ioctl_ops = {
 	.vidioc_s_parm = msm_v4l2_s_parm,
 	.vidioc_g_parm = msm_v4l2_g_parm,
 	.vidioc_enum_framesizes = msm_v4l2_enum_framesizes,
+    /* HTC_START: Pass calling process id and name in kernel space */
+    .vidioc_htc_set_callingpid_name = msm_v4l2_htc_set_callingpid_name,
+    /* HTC_END */
 };
 
 static const struct v4l2_ioctl_ops msm_v4l2_enc_ioctl_ops = {

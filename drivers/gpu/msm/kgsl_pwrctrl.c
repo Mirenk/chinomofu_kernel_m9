@@ -47,7 +47,7 @@
 #define MAX_UDELAY		2000
 
 /* Number of jiffies for a full thermal cycle */
-#define TH_HZ			20
+#define TH_HZ			(HZ/5)
 
 #define KGSL_MAX_BUSLEVELS	20
 
@@ -192,9 +192,14 @@ static unsigned int _adjust_pwrlevel(struct kgsl_pwrctrl *pwr, int level,
 					struct kgsl_pwr_constraint *pwrc,
 					int popp)
 {
-	unsigned int max_pwrlevel = max_t(unsigned int, pwr->thermal_pwrlevel,
+	unsigned int therm_pwrlevel, max_pwrlevel, min_pwrlevel;
+
+	if (pwr->thermal_pwrlevel > 0)
+		therm_pwrlevel = pwr->thermal_pwrlevel - 1;
+
+	max_pwrlevel = max_t(unsigned int, therm_pwrlevel,
 		pwr->max_pwrlevel);
-	unsigned int min_pwrlevel = max_t(unsigned int, pwr->thermal_pwrlevel,
+	min_pwrlevel = max_t(unsigned int, therm_pwrlevel,
 		pwr->min_pwrlevel);
 
 	switch (pwrc->type) {
@@ -1498,7 +1503,7 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 
 	pwr->power_flags = 0;
 
-	pwr->interval_timeout = pdata->idle_timeout;
+	pwr->interval_timeout = msecs_to_jiffies(pdata->idle_timeout);
 	pwr->strtstp_sleepwake = pdata->strtstp_sleepwake;
 
 	if (kgsl_property_read_u32(device, "qcom,pm-qos-active-latency",
@@ -1862,7 +1867,7 @@ static int _wake(struct kgsl_device *device)
 		if (status) {
 			kgsl_pwrctrl_request_state(device, KGSL_STATE_NONE);
 			KGSL_DRV_ERR(device, "start failed %d\n", status);
-			
+			/* Find out the wake-up reason besides PM runtime */
 			dump_stack();
 			break;
 		}
