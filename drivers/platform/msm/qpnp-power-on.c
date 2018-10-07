@@ -29,7 +29,7 @@
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/qpnp/power-on.h>
-#include <../../power/reset/htc_restart_handler.h>
+#include "../../power/reset/htc_restart_handler.h"
 
 #ifdef CONFIG_KPDPWR_S2_DVDD_RESET
 #include <linux/htc_flags.h>
