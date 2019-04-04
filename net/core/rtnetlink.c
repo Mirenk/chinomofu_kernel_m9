@@ -54,7 +54,7 @@
 #include <net/rtnetlink.h>
 #include <net/net_namespace.h>
 
-#if 1 // NW
+#ifdef CONFIG_HTC_NET_DEBUG // NW
 void net_dbg_log_event_oneline(int idx, const char * event, ...);
 int net_dbg_get_free_log_event_oneline(void);
 static int netd_rtnl_lock_idx = -1;
@@ -72,7 +72,7 @@ static DEFINE_MUTEX(rtnl_mutex);
 
 void rtnl_lock(void)
 {
-#if 1 // NW
+#ifdef CONFIG_HTC_NET_DEBUG // NW
 	if (current->real_parent)
 	{
 		if (strcmp(current->comm, "netd") == 0 ||
@@ -91,7 +91,7 @@ void rtnl_lock(void)
 
 	mutex_lock(&rtnl_mutex);
 
-#if 1 // NW
+#ifdef CONFIG_HTC_NET_DEBUG // NW
        if (current->real_parent) {
 		net_dbg_log_event_oneline(rtnl_lock_idx, "rtnl_lock by [%d,%s], parent=[%d,%s]", current->pid, current->comm, current->real_parent->pid, current->real_parent->comm);
        } else {
@@ -105,7 +105,7 @@ EXPORT_SYMBOL(rtnl_lock);
 void __rtnl_unlock(void)
 {
 	mutex_unlock(&rtnl_mutex);
-#if 1 // NW
+#ifdef CONFIG_HTC_NET_DEBUG // NW
        if (current->real_parent) {
 		net_dbg_log_event_oneline(rtnl_unlock_idx, "__rtnl_unlock  by [%d,%s], parent=[%d,%s]", current->pid, current->comm, current->real_parent->pid, current->real_parent->comm);
        } else {
@@ -1350,6 +1350,10 @@ static int do_setlink(const struct sk_buff *skb,
 	const struct net_device_ops *ops = dev->netdev_ops;
 	int err;
 
+	err = validate_linkmsg(dev, tb);
+	if (err < 0)
+		return err;
+
 	if (tb[IFLA_NET_NS_PID] || tb[IFLA_NET_NS_FD]) {
 		struct net *net = rtnl_link_get_net(dev_net(dev), tb);
 		if (IS_ERR(net)) {
@@ -1607,10 +1611,6 @@ static int rtnl_setlink(struct sk_buff *skb, struct nlmsghdr *nlh)
 		goto errout;
 	}
 
-	err = validate_linkmsg(dev, tb);
-	if (err < 0)
-		goto errout;
-
 	err = do_setlink(skb, dev, ifm, tb, ifname, 0);
 errout:
 	return err;
@@ -1691,6 +1691,12 @@ struct net_device *rtnl_create_link(struct net *net,
 		num_rx_queues = nla_get_u32(tb[IFLA_NUM_RX_QUEUES]);
 	else if (ops->get_num_rx_queues)
 		num_rx_queues = ops->get_num_rx_queues();
+
+	if (num_tx_queues < 1 || num_tx_queues > 4096)
+		return ERR_PTR(-EINVAL);
+
+	if (num_rx_queues < 1 || num_rx_queues > 4096)
+		return ERR_PTR(-EINVAL);
 
 	err = -ENOMEM;
 	dev = alloc_netdev_mqs(ops->priv_size, ifname, ops->setup,
@@ -2165,6 +2171,11 @@ static int rtnl_fdb_add(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EINVAL;
 	}
 
+	if (dev->type != ARPHRD_ETHER) {
+		pr_info("PF_BRIDGE: FDB add only supported for Ethernet devices\n");
+		return -EINVAL;
+	}
+
 	addr = nla_data(tb[NDA_LLADDR]);
 	if (is_zero_ether_addr(addr)) {
 		pr_info("PF_BRIDGE: RTM_NEWNEIGH with invalid ether address\n");
@@ -2266,6 +2277,11 @@ static int rtnl_fdb_del(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EINVAL;
 	}
 
+	if (dev->type != ARPHRD_ETHER) {
+		pr_info("PF_BRIDGE: FDB delete only supported for Ethernet devices\n");
+		return -EINVAL;
+	}
+
 	addr = nla_data(tb[NDA_LLADDR]);
 	if (is_zero_ether_addr(addr)) {
 		pr_info("PF_BRIDGE: RTM_DELNEIGH with invalid ether address\n");
@@ -2348,6 +2364,9 @@ int ndo_dflt_fdb_dump(struct sk_buff *skb,
 		      int idx)
 {
 	int err;
+
+	if (dev->type != ARPHRD_ETHER)
+		return -EINVAL;
 
 	netif_addr_lock_bh(dev);
 	err = nlmsg_populate_fdb(skb, cb, dev, &idx, &dev->uc);
@@ -2827,7 +2846,7 @@ void __init rtnetlink_init(void)
 	rtnl_register(PF_BRIDGE, RTM_DELLINK, rtnl_bridge_dellink, NULL, NULL);
 	rtnl_register(PF_BRIDGE, RTM_SETLINK, rtnl_bridge_setlink, NULL, NULL);
 
-#if 1 // NW
+#ifdef CONFIG_HTC_NET_DEBUG // NW
 	netd_rtnl_lock_idx = net_dbg_get_free_log_event_oneline();
 	rtnl_lock_idx = net_dbg_get_free_log_event_oneline();
 	rtnl_unlock_idx = net_dbg_get_free_log_event_oneline();

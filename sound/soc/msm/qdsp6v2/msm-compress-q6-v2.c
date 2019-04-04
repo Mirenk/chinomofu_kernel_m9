@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -75,6 +75,7 @@
 #define COMPR_PLAYBACK_MAX_FRAGMENT_SIZE (128 * 1024)
 #define COMPR_PLAYBACK_MIN_NUM_FRAGMENTS (4)
 #define COMPR_PLAYBACK_MAX_NUM_FRAGMENTS (16 * 4)
+#define COMPR_PLAYBACK_DSP_FRAGMEMT_SIZE (32 * 1024)
 
 #define COMPRESSED_LR_VOL_MAX_STEPS	0x2000
 const DECLARE_TLV_DB_LINEAR(msm_compr_vol_gain, 0,
@@ -118,7 +119,7 @@ struct msm_compr_gapless_state {
 
 static unsigned int supported_sample_rates[] = {
 	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000,
-	88200, 96000, 176400, 192000
+	88200, 96000, 128000, 176400, 192000
 };
 
 struct msm_compr_pdata {
@@ -191,6 +192,11 @@ struct msm_compr_audio {
 	wait_queue_head_t drain_wait;
 	wait_queue_head_t close_wait;
 	wait_queue_head_t wait_for_stream_avail;
+
+	uint32_t dsp_fragment_size;
+	uint32_t dsp_fragments;
+	uint32_t dsp_fragment_ratio;
+	uint32_t dsp_fragments_sent;
 
 	spinlock_t lock;
 };
@@ -397,10 +403,15 @@ static int msm_compr_send_buffer(struct msm_compr_audio *prtd)
 				prtd->gapless_state.initial_samples_drop,
 				prtd->gapless_state.trailing_samples_drop);
 
-	buffer_length = prtd->codec_param.buffer.fragment_size;
 	bytes_available = prtd->bytes_received - prtd->copied_total;
-	if (bytes_available < prtd->codec_param.buffer.fragment_size)
+
+	if (bytes_available < prtd->dsp_fragment_size)
 		buffer_length = bytes_available;
+	else if (bytes_available > prtd->cstream->runtime->fragment_size)
+		buffer_length = prtd->cstream->runtime->fragment_size;
+	else
+		buffer_length =
+			(bytes_available / prtd->dsp_fragment_size) * prtd->dsp_fragment_size;
 
 	if (prtd->byte_offset + buffer_length > prtd->buffer_size) {
 		buffer_length = (prtd->buffer_size - prtd->byte_offset);
@@ -487,7 +498,11 @@ static void compr_event_handler(uint32_t opcode,
 		if (prtd->byte_offset >= prtd->buffer_size)
 			prtd->byte_offset -= prtd->buffer_size;
 
-		snd_compr_fragment_elapsed(cstream);
+		prtd->dsp_fragments_sent += token / prtd->dsp_fragment_size;
+		if (prtd->dsp_fragments_sent >= prtd->dsp_fragment_ratio) {
+			snd_compr_fragment_elapsed(cstream);
+			prtd->dsp_fragments_sent = 0;
+		}
 
 		if (!atomic_read(&prtd->start)) {
 			/* Writes must be restarted from _copy() */
@@ -498,7 +513,7 @@ static void compr_event_handler(uint32_t opcode,
 		}
 
 		bytes_available = prtd->bytes_received - prtd->copied_total;
-		if (bytes_available < cstream->runtime->fragment_size) {
+		if (bytes_available < prtd->dsp_fragment_size) {
 			pr_debug("WRITE_DONE Insufficient data to send. break out\n");
 			atomic_set(&prtd->xrun, 1);
 
@@ -510,8 +525,8 @@ static void compr_event_handler(uint32_t opcode,
 				wake_up(&prtd->drain_wait);
 				atomic_set(&prtd->drain, 0);
 			}
-		} else if ((bytes_available == cstream->runtime->fragment_size)
-			   && atomic_read(&prtd->drain)) {
+		} else if ((bytes_available == prtd->dsp_fragment_size)
+				 && atomic_read(&prtd->drain)) {
 			prtd->last_buffer = 1;
 			msm_compr_send_buffer(prtd);
 			prtd->last_buffer = 0;
@@ -579,7 +594,7 @@ static void compr_event_handler(uint32_t opcode,
 			spin_lock_irqsave(&prtd->lock, flags);
 			if (!prtd->bytes_sent) {
 				bytes_available = prtd->bytes_received - prtd->copied_total;
-				if (bytes_available < cstream->runtime->fragment_size) {
+				if (bytes_available < prtd->dsp_fragment_size) {
 					pr_debug("CMD_RUN_V2 Insufficient data to send. break out\n");
 					atomic_set(&prtd->xrun, 1);
 				} else
@@ -691,7 +706,7 @@ static void populate_codec_list(struct msm_compr_audio *prtd)
 			COMPR_PLAYBACK_MIN_NUM_FRAGMENTS;
 	prtd->compr_cap.max_fragments =
 			COMPR_PLAYBACK_MAX_NUM_FRAGMENTS;
-	prtd->compr_cap.num_codecs = 8;
+	prtd->compr_cap.num_codecs = 9;
 	prtd->compr_cap.codecs[0] = SND_AUDIOCODEC_MP3;
 	prtd->compr_cap.codecs[1] = SND_AUDIOCODEC_AAC;
 	prtd->compr_cap.codecs[2] = SND_AUDIOCODEC_AC3;
@@ -820,7 +835,7 @@ static int msm_compr_send_media_format_block(struct snd_compr_stream *cstream,
 		wma_cfg.ch_mask = codec_options->wma.channelmask;
 		wma_cfg.encode_opt = codec_options->wma.encodeopt;
 		ret = q6asm_media_format_block_wma(prtd->audio_client,
-					&wma_cfg);
+					&wma_cfg, stream_id);
 		if (ret < 0)
 			pr_err("%s: CMD Format block failed\n", __func__);
 		break;
@@ -839,7 +854,7 @@ static int msm_compr_send_media_format_block(struct snd_compr_stream *cstream,
 		wma_pro_cfg.adv_encode_opt = codec_options->wma.encodeopt1;
 		wma_pro_cfg.adv_encode_opt2 = codec_options->wma.encodeopt2;
 		ret = q6asm_media_format_block_wmapro(prtd->audio_client,
-				&wma_pro_cfg);
+				&wma_pro_cfg, stream_id);
 		if (ret < 0)
 			pr_err("%s: CMD Format block failed\n", __func__);
 		break;
@@ -1024,12 +1039,32 @@ static int msm_compr_configure_dsp(struct snd_compr_stream *cstream)
 	prtd->gapless_state.stream_opened[stream_index] = 1;
 	runtime->fragments = prtd->codec_param.buffer.fragments;
 	runtime->fragment_size = prtd->codec_param.buffer.fragment_size;
+
+	/* use smaller DSP fragments to ease gapless transition by reducing the
+	 * minimum amount of data necessary to start DSP decoding
+	 */
+	if (runtime->fragment_size < COMPR_PLAYBACK_DSP_FRAGMEMT_SIZE) {
+		prtd->dsp_fragment_size = runtime->fragment_size;
+	} else if ((runtime->fragment_size % COMPR_PLAYBACK_DSP_FRAGMEMT_SIZE) != 0) {
+		pr_err("%s: Invalid fragment size: %d", __func__, runtime->fragment_size);
+		return -EINVAL;
+	} else {
+		prtd->dsp_fragment_size = COMPR_PLAYBACK_DSP_FRAGMEMT_SIZE;
+	}
+	prtd->dsp_fragment_ratio = runtime->fragment_size / prtd->dsp_fragment_size;
+	prtd->dsp_fragments = runtime->fragments * prtd->dsp_fragment_ratio;
+
+	if (prtd->dsp_fragments > COMPR_PLAYBACK_MAX_NUM_FRAGMENTS) {
+		pr_err("%s: Invalid fragment count: %d", __func__, prtd->dsp_fragments);
+		return -EINVAL;
+	}
+
 	pr_debug("allocate %d buffers each of size %d\n",
 			runtime->fragments,
 			runtime->fragment_size);
 	ret = q6asm_audio_client_buf_alloc_contiguous(dir, ac,
-					runtime->fragment_size,
-					runtime->fragments);
+			prtd->dsp_fragment_size,
+			prtd->dsp_fragments);
 	if (ret < 0) {
 		pr_err("Audio Start: Buffer Allocation failed rc = %d\n", ret);
 		return -ENOMEM;
@@ -1040,6 +1075,7 @@ static int msm_compr_configure_dsp(struct snd_compr_stream *cstream)
 	prtd->app_pointer  = 0;
 	prtd->bytes_received = 0;
 	prtd->bytes_sent = 0;
+	prtd->dsp_fragments_sent = 0;
 	prtd->buffer       = ac->port[dir].buf[0].data;
 	prtd->buffer_paddr = ac->port[dir].buf[0].phys;
 	prtd->buffer_size  = runtime->fragments * runtime->fragment_size;
@@ -1254,6 +1290,7 @@ static int msm_compr_free(struct snd_compr_stream *cstream)
 	kfree(pdata->dec_params[soc_prtd->dai_link->be_id]);
 	pdata->dec_params[soc_prtd->dai_link->be_id] = NULL;
 	kfree(prtd);
+	runtime->private_data = NULL;
 
 	return 0;
 }
@@ -1566,6 +1603,7 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 		prtd->app_pointer  = 0;
 		prtd->bytes_received = 0;
 		prtd->bytes_sent = 0;
+		prtd->dsp_fragments_sent = 0;
 		prtd->marker_timestamp = 0;
 
 		atomic_set(&prtd->xrun, 0);
@@ -1638,8 +1676,8 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 			 */
 			bytes_to_write = prtd->bytes_received
 						- prtd->copied_total;
-			WARN(bytes_to_write > runtime->fragment_size,
-			     "last write %d cannot be > than fragment_size",
+			WARN(bytes_to_write > prtd->dsp_fragment_size,
+			     "last write %d cannot be > than dsp_fragment_size",
 			     bytes_to_write);
 
 			if (bytes_to_write > 0) {
@@ -1658,7 +1696,7 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 			if (prtd->last_buffer) {
 				pr_debug("%s: last buffer drain\n", __func__);
 				rc = msm_compr_drain_buffer(prtd, &flags);
-				if (rc) {
+				if (rc || !atomic_read(&prtd->start)) {
 					spin_unlock_irqrestore(&prtd->lock,
 									flags);
 					break;
@@ -1678,7 +1716,7 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 			/* wait for the zero length buffer to be returned */
 			pr_debug("%s: zero length buffer drain\n", __func__);
 			rc = msm_compr_drain_buffer(prtd, &flags);
-			if (rc) {
+			if (rc || !atomic_read(&prtd->start)) {
 				spin_unlock_irqrestore(&prtd->lock, flags);
 				break;
 			}
@@ -1720,6 +1758,7 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 			prtd->first_buffer = 1;
 			prtd->last_buffer = 0;
 			prtd->gapless_state.gapless_transition = 1;
+			prtd->dsp_fragments_sent = 0;
 			prtd->marker_timestamp = 0;
 
 			/*
@@ -1821,6 +1860,7 @@ static int msm_compr_trigger(struct snd_compr_stream *cstream, int cmd)
 			prtd->app_pointer  = 0;
 			prtd->first_buffer = 1;
 			prtd->last_buffer = 0;
+			prtd->dsp_fragments_sent = 0;
 			atomic_set(&prtd->drain, 0);
 			atomic_set(&prtd->xrun, 1);
 			spin_unlock_irqrestore(&prtd->lock, flags);
@@ -2093,7 +2133,7 @@ static int msm_compr_copy(struct snd_compr_stream *cstream,
 
 	/*
 	 * If stream is started and there has been an xrun,
-	 * since the available bytes fits fragment_size, copy the data right away
+	 * since the available bytes fits dsp_fragment_size, copy the data right away
 	 */
 	spin_lock_irqsave(&prtd->lock, flags);
 	prtd->bytes_received += count;
@@ -2101,7 +2141,7 @@ static int msm_compr_copy(struct snd_compr_stream *cstream,
 		if (atomic_read(&prtd->xrun)) {
 			pr_debug("%s: in xrun, count = %zd\n", __func__, count);
 			bytes_available = prtd->bytes_received - prtd->copied_total;
-			if (bytes_available >= runtime->fragment_size) {
+			if (bytes_available >= prtd->dsp_fragment_size) {
 				//htc audio ++
 				if (prtd->stream_end){
 					pr_debug("reset lasttimestamp at msm_compr_send_buffer\n");
@@ -2134,7 +2174,7 @@ static int msm_compr_get_caps(struct snd_compr_stream *cstream,
 		memcpy(arg, &prtd->compr_cap, sizeof(struct snd_compr_caps));
 	} else {
 		ret = -EINVAL;
-		pr_err("%s: arg (0x%p), prtd (0x%p)\n", __func__, arg, prtd);
+		pr_err("%s: arg (0x%pK), prtd (0x%pK)\n", __func__, arg, prtd);
 	}
 
 	return ret;

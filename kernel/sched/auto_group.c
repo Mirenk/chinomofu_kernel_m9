@@ -8,6 +8,7 @@
 #include <linux/utsname.h>
 #include <linux/security.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 
 unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
 static struct autogroup autogroup_default;
@@ -148,11 +149,8 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 	if (!ACCESS_ONCE(sysctl_sched_autogroup_enabled))
 		goto out;
 
-	t = p;
-	do {
+	for_each_thread(p, t)
 		sched_move_task(t);
-	} while_each_thread(p, t);
-
 out:
 	unlock_task_sighand(p, &flags);
 	autogroup_kref_put(prev);
@@ -201,7 +199,8 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 {
 	static unsigned long next = INITIAL_JIFFIES;
 	struct autogroup *ag;
-	int err;
+	unsigned long shares;
+	int err, idx;
 
 	if (nice < -20 || nice > 19)
 		return -EINVAL;
@@ -220,8 +219,11 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 	next = HZ / 10 + jiffies;
 	ag = autogroup_task_get(p);
 
+	idx = array_index_nospec(nice + 20, 40);
+	shares = scale_load(prio_to_weight[idx]);
+
 	down_write(&ag->lock);
-	err = sched_group_set_shares(ag->tg, prio_to_weight[nice + 20]);
+	err = sched_group_set_shares(ag->tg, shares);
 	if (!err)
 		ag->nice = nice;
 	up_write(&ag->lock);

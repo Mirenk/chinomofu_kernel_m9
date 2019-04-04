@@ -43,7 +43,6 @@
 #define TEMP_MAX_POINT 95
 #define CPU_HOTPLUG_LIMIT 80
 #define CPU_BIT_MASK(cpu) BIT(cpu)
-#define DEFAULT_TEMP 40
 #define DEFAULT_LOW_HYST_TEMP 10
 #define DEFAULT_HIGH_HYST_TEMP 5
 #define CLUSTER_OFFSET_FOR_MPIDR 8
@@ -361,7 +360,7 @@ static int update_userspace_power(struct sched_params __user *argp)
 {
 	int i;
 	int ret;
-	int cpu;
+	int cpu = -1;
 	struct cpu_activity_info *node;
 	struct cpu_static_info *sp, *clear_sp;
 	int cpumask, cluster, mpidr;
@@ -383,7 +382,7 @@ static int update_userspace_power(struct sched_params __user *argp)
 		}
 	}
 
-	if (cpu >= num_possible_cpus())
+	if ((cpu < 0) || (cpu >= num_possible_cpus()))
 		return -EINVAL;
 
 	node = &activity[cpu];

@@ -19,7 +19,7 @@
 #include <linux/genhd.h>
 #include <linux/delay.h>
 #include <linux/atomic.h>
-#include "blk-cgroup.h"
+#include <linux/blk-cgroup.h>
 #include "blk.h"
 
 #define MAX_KEY_LEN 100
@@ -206,7 +206,7 @@ EXPORT_SYMBOL_GPL(blkg_lookup);
 
 /*
  * If @new_blkg is %NULL, this function tries to allocate a new one as
- * necessary using %GFP_ATOMIC.  @new_blkg is always consumed on return.
+ * necessary using %GFP_NOWAIT.  @new_blkg is always consumed on return.
  */
 static struct blkcg_gq *blkg_create(struct blkcg *blkcg,
 				    struct request_queue *q,
@@ -226,7 +226,7 @@ static struct blkcg_gq *blkg_create(struct blkcg *blkcg,
 
 	/* allocate */
 	if (!new_blkg) {
-		new_blkg = blkg_alloc(blkcg, q, GFP_ATOMIC);
+		new_blkg = blkg_alloc(blkcg, q, GFP_NOWAIT);
 		if (unlikely(!new_blkg)) {
 			ret = -ENOMEM;
 			goto err_put_css;
@@ -829,7 +829,6 @@ static void blkcg_css_free(struct cgroup *cgroup)
 
 static struct cgroup_subsys_state *blkcg_css_alloc(struct cgroup *cgroup)
 {
-	static atomic64_t id_seq = ATOMIC64_INIT(0);
 	struct blkcg *blkcg;
 	struct cgroup *parent = cgroup->parent;
 
@@ -844,10 +843,9 @@ static struct cgroup_subsys_state *blkcg_css_alloc(struct cgroup *cgroup)
 
 	blkcg->cfq_weight = CFQ_WEIGHT_DEFAULT;
 	blkcg->cfq_leaf_weight = CFQ_WEIGHT_DEFAULT;
-	blkcg->id = atomic64_inc_return(&id_seq); /* root is 0, start from 1 */
 done:
 	spin_lock_init(&blkcg->lock);
-	INIT_RADIX_TREE(&blkcg->blkg_tree, GFP_ATOMIC);
+	INIT_RADIX_TREE(&blkcg->blkg_tree, GFP_NOWAIT);
 	INIT_HLIST_HEAD(&blkcg->blkg_list);
 
 	return &blkcg->css;

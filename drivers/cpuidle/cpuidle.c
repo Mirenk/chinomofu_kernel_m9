@@ -86,7 +86,8 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 
 	time_end = ktime_get();
 
-	local_irq_enable();
+	if (!cpuidle_state_is_coupled(dev, drv, entered_state))
+		local_irq_enable();
 
 	diff = ktime_to_us(ktime_sub(time_end, time_start));
 	if (diff > INT_MAX)
@@ -118,7 +119,8 @@ int cpuidle_idle_call(void)
 {
 	struct cpuidle_device *dev = __this_cpu_read(cpuidle_devices);
 	struct cpuidle_driver *drv;
-	int next_state, entered_state;
+	int next_state, entered_state = 0;
+	bool broadcast;
 
 	if (need_resched()) {
 		local_irq_enable();
@@ -151,7 +153,9 @@ int cpuidle_idle_call(void)
 		return 0;
 	}
 
-	if (drv->states[next_state].flags & CPUIDLE_FLAG_TIMER_STOP)
+	broadcast = !!(drv->states[next_state].flags & CPUIDLE_FLAG_TIMER_STOP);
+
+	if (broadcast)
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER,
 				   &dev->cpu);
 
@@ -161,7 +165,7 @@ int cpuidle_idle_call(void)
 	else
 		entered_state = cpuidle_enter_state(dev, drv, next_state);
 
-	if (drv->states[next_state].flags & CPUIDLE_FLAG_TIMER_STOP)
+	if (broadcast)
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT,
 				   &dev->cpu);
 

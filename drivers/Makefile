@@ -174,8 +174,12 @@ obj-$(CONFIG_SENSORS_SSC)	+= sensors/
 obj-y += htc_sdservice/
 
 #HTC Debug
-obj-$(CONFIG_HTC_DEBUG)		+= htc_debug/
+obj-y		+= htc_debug/
 
 obj-$(CONFIG_HTC_DEBUG_FOOTPRINT)	+= htc_mnemosyne/
 obj-$(CONFIG_HTC_POWER_DEBUG)		+= htc_power_debug/
 obj-y += htc_ril/
+
+# DTS_EAGLE START
+obj-$(CONFIG_AINUR_DTS_SW) += dts_eagle/
+# DTS_EAGLE END

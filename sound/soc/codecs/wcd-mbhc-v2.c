@@ -519,9 +519,9 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 		else if (jack_type == SND_JACK_LINEOUT)
 			mbhc->current_plug = MBHC_PLUG_TYPE_HIGH_HPH;
 
-		//if (mbhc->impedance_detect && mbhc->mbhc_cb->compute_impedance &&
-		//	(mbhc->mbhc_cfg->linein_th != 0)) {
-		if (mbhc->impedance_detect && mbhc->mbhc_cb->compute_impedance){
+                //if (mbhc->impedance_detect && mbhc->mbhc_cb->compute_impedance &&
+                //	(mbhc->mbhc_cfg->linein_th != 0)) {
+                if (mbhc->impedance_detect && mbhc->mbhc_cb->compute_impedance){
 			mbhc->mbhc_cb->compute_impedance(mbhc,
 					&mbhc->zl, &mbhc->zr);
 

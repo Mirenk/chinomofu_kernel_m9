@@ -998,7 +998,7 @@ int adm_set_stereo_to_custom_stereo(int port_id, int copp_idx,
 	adm_params->hdr.dest_svc = APR_SVC_ADM;
 	adm_params->hdr.dest_domain = APR_DOMAIN_ADSP;
 	adm_params->hdr.dest_port = 0; /* Ignored */;
-	adm_params->hdr.token = 0;
+	adm_params->hdr.token = port_idx << 16 | copp_idx;
 	adm_params->hdr.opcode = ADM_CMD_SET_PSPD_MTMX_STRTR_PARAMS_V5;
 	adm_params->payload_addr_lsw = 0;
 	adm_params->payload_addr_msw = 0;
@@ -1365,7 +1365,7 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 	payload = data->payload;
 
 	if (data->opcode == RESET_EVENTS) {
-		pr_debug("%s: Reset event is received: %d %d apr[%p]\n",
+		pr_debug("%s: Reset event is received: %d %d apr[%pK]\n",
 			__func__,
 			data->reset_event, data->reset_proc, this_adm.apr);
 		if (this_adm.apr) {
@@ -1773,7 +1773,7 @@ static void remap_cal_data(struct cal_block_data *cal_block, int cal_index)
 			pr_err("%s: ADM mmap did not work! size = %zd ret %d\n",
 				__func__,
 				cal_block->map_data.map_size, ret);
-			pr_debug("%s: ADM mmap did not work! addr = 0x%pa, size = %zd ret %d\n",
+			pr_debug("%s: ADM mmap did not work! addr = 0x%pK, size = %zd ret %d\n",
 				__func__,
 				&cal_block->cal_data.paddr,
 				cal_block->map_data.map_size, ret);
@@ -1835,7 +1835,7 @@ static void send_adm_custom_topology(void)
 	adm_top.payload_size = cal_block->cal_data.size;
 
 	atomic_set(&this_adm.adm_stat, 0);
-	pr_debug("%s: Sending ADM_CMD_ADD_TOPOLOGIES payload = 0x%pa, size = %d\n",
+	pr_debug("%s: Sending ADM_CMD_ADD_TOPOLOGIES payload = 0x%pK, size = %d\n",
 		__func__, &cal_block->cal_data.paddr,
 		adm_top.payload_size);
 	result = apr_send_pkt(this_adm.apr, (uint32_t *)&adm_top);
@@ -1917,14 +1917,14 @@ static int send_adm_cal_block(int port_id, int copp_idx,
 	adm_params.payload_size = cal_block->cal_data.size;
 
 	atomic_set(&this_adm.copp.stat[port_idx][copp_idx], 0);
-	pr_debug("%s: Sending SET_PARAMS payload = 0x%pa, size = %d\n",
+	pr_debug("%s: Sending SET_PARAMS payload = 0x%pK, size = %d\n",
 		__func__, &cal_block->cal_data.paddr,
 		adm_params.payload_size);
 	result = apr_send_pkt(this_adm.apr, (uint32_t *)&adm_params);
 	if (result < 0) {
 		pr_err("%s: Set params failed port 0x%x result %d\n",
 				__func__, port_id, result);
-		pr_debug("%s: Set params failed port = 0x%x payload = 0x%pa result %d\n",
+		pr_debug("%s: Set params failed port = 0x%x payload = 0x%pK result %d\n",
 			__func__, port_id, &cal_block->cal_data.paddr, result);
 		result = -EINVAL;
 		goto done;
@@ -1936,7 +1936,7 @@ static int send_adm_cal_block(int port_id, int copp_idx,
 	if (!result) {
 		pr_err("%s: Set params timed out port = 0x%x\n",
 				__func__, port_id);
-		pr_debug("%s: Set params timed out port = 0x%x, payload = 0x%pa\n",
+		pr_debug("%s: Set params timed out port = 0x%x, payload = 0x%pK\n",
 			__func__, port_id, &cal_block->cal_data.paddr);
 		result = -EINVAL;
 		goto done;
@@ -2365,7 +2365,7 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
 		res = adm_memory_map_regions(&this_adm.outband_memmap.paddr, 0,
 		(uint32_t *)&this_adm.outband_memmap.size, 1);
 		if (res < 0) {
-			pr_err("%s: SRS adm_memory_map_regions failed ! addr = 0x%p, size = %d\n",
+			pr_err("%s: SRS adm_memory_map_regions failed ! addr = 0x%pK, size = %d\n",
 			 __func__, (void *)this_adm.outband_memmap.paddr,
 		(uint32_t)this_adm.outband_memmap.size);
 		}
@@ -2774,7 +2774,7 @@ int adm_map_rtac_block(struct rtac_cal_block_data *cal_block)
 		pr_err("%s: RTAC mmap did not work! size = %d result %d\n",
 			__func__,
 			cal_block->map_data.map_size, result);
-		pr_debug("%s: RTAC mmap did not work! addr = 0x%pa, size = %d\n",
+		pr_debug("%s: RTAC mmap did not work! addr = 0x%pK, size = %d\n",
 			__func__,
 			&cal_block->cal_data.paddr,
 			cal_block->map_data.map_size);
@@ -3502,7 +3502,7 @@ int adm_store_cal_data(int port_id, int copp_idx, int path, int perf_mode,
 	sample_rate = atomic_read(&this_adm.copp.rate[port_idx][copp_idx]);
 
 	mutex_lock(&this_adm.cal_data[cal_index]->lock);
-	cal_block = adm_find_cal(cal_index, path, app_type,
+	cal_block = adm_find_cal(cal_index, get_cal_path(path), app_type,
 				acdb_id, sample_rate);
 	if (cal_block == NULL)
 		goto unlock;
@@ -3513,11 +3513,6 @@ int adm_store_cal_data(int port_id, int copp_idx, int path, int perf_mode,
 		rc = -EINVAL;
 		goto unlock;
 	}
-
-	pr_debug("%s:port_id %d, copp_idx %d, path %d",
-		 __func__, port_id, copp_idx, path);
-	pr_debug("perf_mode %d, cal_type %d, size %d\n",
-		 perf_mode, cal_index, *size);
 
 	if (cal_index == ADM_AUDPROC_CAL) {
 		if (cal_block->cal_data.size > AUD_PROC_BLOCK_SIZE) {
@@ -3541,6 +3536,11 @@ int adm_store_cal_data(int port_id, int copp_idx, int path, int perf_mode,
 	}
 	memcpy(params, cal_block->cal_data.kvaddr, cal_block->cal_data.size);
 	*size = cal_block->cal_data.size;
+
+	pr_debug("%s:port_id %d, copp_idx %d, path %d",
+		 __func__, port_id, copp_idx, path);
+	pr_debug("perf_mode %d, cal_type %d, size %d\n",
+		 perf_mode, cal_index, *size);
 
 unlock:
 	mutex_unlock(&this_adm.cal_data[cal_index]->lock);

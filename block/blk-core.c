@@ -31,12 +31,12 @@
 #include <linux/delay.h>
 #include <linux/ratelimit.h>
 #include <linux/pm_runtime.h>
+#include <linux/blk-cgroup.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
 
 #include "blk.h"
-#include "blk-cgroup.h"
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
@@ -1612,6 +1612,11 @@ get_rq:
 	rw_flags = bio_data_dir(bio);
 	if (sync)
 		rw_flags |= REQ_SYNC;
+
+	/*
+	 * Add in META/PRIO flags, if set, before we get to the IO scheduler
+	 */
+	rw_flags |= (bio->bi_rw & (REQ_META | REQ_PRIO));
 
 	/*
 	 * Grab a free request. This is might sleep but can not fail.

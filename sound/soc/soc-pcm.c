@@ -438,8 +438,9 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 		} else {
 			/* start delayed pop wq here for playback streams */
 			rtd->pop_wait = 1;
-			schedule_delayed_work(&rtd->delayed_work,
-				msecs_to_jiffies(rtd->pmdown_time));
+			queue_delayed_work(system_power_efficient_wq,
+					   &rtd->delayed_work,
+					   msecs_to_jiffies(rtd->pmdown_time));
 		}
 	} else {
 		/* capture streams can be powered down now */
@@ -751,6 +752,9 @@ static snd_pcm_uframes_t soc_pcm_pointer(struct snd_pcm_substream *substream)
 	if (platform->driver->ops && platform->driver->ops->pointer)
 		offset = platform->driver->ops->pointer(substream);
 
+	if (platform->driver->delay_blk)
+		return offset;
+
 	if (cpu_dai->driver->ops->delay)
 		delay += cpu_dai->driver->ops->delay(substream, cpu_dai);
 
@@ -763,6 +767,21 @@ static snd_pcm_uframes_t soc_pcm_pointer(struct snd_pcm_substream *substream)
 	runtime->delay = delay;
 
 	return offset;
+}
+
+static int soc_pcm_delay_blk(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_platform *platform = rtd->platform;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	snd_pcm_sframes_t delay = 0;
+
+	if (platform->driver->delay_blk)
+		delay = platform->driver->delay_blk(substream, rtd->codec_dai);
+
+	runtime->delay = delay;
+
+	return 0;
 }
 
 /* connect a FE and BE */
@@ -1282,8 +1301,10 @@ int dpcm_be_dai_shutdown(struct snd_soc_pcm_runtime *fe, int stream)
 				be->dai_link->name,be->dpcm[stream].users); //HTC_AUDIO
 
 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_FREE) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_OPEN))
-			continue;
+		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_OPEN)) {
+			soc_pcm_hw_free(be_substream);
+			be->dpcm[stream].state = SND_SOC_DPCM_STATE_HW_FREE;
+		}
 
 		pr_debug("close path  %s %s %s \n", fe->dai_link->stream_name,(stream == SNDRV_PCM_STREAM_PLAYBACK)?"->":"<-",be->dai_link->name); //HTC_AUDIO
 
@@ -2427,6 +2448,7 @@ int soc_new_pcm(struct snd_soc_pcm_runtime *rtd, int num)
 		rtd->ops.hw_free	= dpcm_fe_dai_hw_free;
 		rtd->ops.close		= dpcm_fe_dai_close;
 		rtd->ops.pointer	= soc_pcm_pointer;
+		rtd->ops.delay_blk	= soc_pcm_delay_blk;
 		rtd->ops.ioctl		= soc_pcm_ioctl;
 		rtd->ops.compat_ioctl   = soc_pcm_compat_ioctl;
 	} else {
@@ -2437,6 +2459,7 @@ int soc_new_pcm(struct snd_soc_pcm_runtime *rtd, int num)
 		rtd->ops.hw_free	= soc_pcm_hw_free;
 		rtd->ops.close		= soc_pcm_close;
 		rtd->ops.pointer	= soc_pcm_pointer;
+		rtd->ops.delay_blk	= soc_pcm_delay_blk;
 		rtd->ops.ioctl		= soc_pcm_ioctl;
 		rtd->ops.compat_ioctl   = soc_pcm_compat_ioctl;
 	}

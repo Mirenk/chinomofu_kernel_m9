@@ -49,9 +49,6 @@ struct blkcg {
 	struct blkcg_gq			*blkg_hint;
 	struct hlist_head		blkg_list;
 
-	/* for policies to test whether associated blkcg has changed */
-	uint64_t			id;
-
 	/* TODO: per-policy storage in blkcg */
 	unsigned int			cfq_weight;	/* belongs to cfq */
 	unsigned int			cfq_leaf_weight;
@@ -371,6 +368,11 @@ struct request_list *__blk_queue_next_rl(struct request_list *rl,
 #define blk_queue_for_each_rl(rl, q)	\
 	for ((rl) = &(q)->root_rl; (rl); (rl) = __blk_queue_next_rl((rl), (q)))
 
+static inline void blkg_stat_init(struct blkg_stat *stat)
+{
+	u64_stats_init(&stat->syncp);
+}
+
 /**
  * blkg_stat_add - add a value to a blkg_stat
  * @stat: target blkg_stat
@@ -425,6 +427,11 @@ static inline void blkg_stat_reset(struct blkg_stat *stat)
 static inline void blkg_stat_merge(struct blkg_stat *to, struct blkg_stat *from)
 {
 	blkg_stat_add(to, blkg_stat_read(from));
+}
+
+static inline void blkg_rwstat_init(struct blkg_rwstat *rwstat)
+{
+	u64_stats_init(&rwstat->syncp);
 }
 
 /**

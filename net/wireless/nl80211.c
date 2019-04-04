@@ -476,6 +476,14 @@ nl80211_match_policy[NL80211_SCHED_SCAN_MATCH_ATTR_MAX + 1] = {
 	[NL80211_SCHED_SCAN_MATCH_ATTR_RSSI] = { .type = NLA_U32 },
 };
 
+/* policy for packet pattern attributes */
+static const struct nla_policy
+nl80211_packet_pattern_policy[MAX_NL80211_WOWLAN_PKTPAT + 1] = {
+	[NL80211_WOWLAN_PKTPAT_MASK] = { .type = NLA_BINARY, },
+	[NL80211_WOWLAN_PKTPAT_PATTERN] = { .type = NLA_BINARY, },
+	[NL80211_WOWLAN_PKTPAT_OFFSET] = { .type = NLA_U32 },
+};
+
 static int nl80211_prepare_wdev_dump(struct sk_buff *skb,
 				     struct netlink_callback *cb,
 				     struct cfg80211_registered_device **rdev,
@@ -2322,13 +2330,40 @@ static int nl80211_send_iface(struct sk_buff *msg, u32 portid, u32 seq, int flag
 		}
 	}
 
-	if (wdev->ssid_len) {
-		if (nla_put(msg, NL80211_ATTR_SSID, wdev->ssid_len, wdev->ssid))
-			goto nla_put_failure;
+	wdev_lock(wdev);
+	switch (wdev->iftype) {
+	case NL80211_IFTYPE_AP:
+		if (wdev->ssid_len &&
+		    nla_put(msg, NL80211_ATTR_SSID, wdev->ssid_len, wdev->ssid))
+			goto nla_put_failure_locked;
+		break;
+	case NL80211_IFTYPE_STATION:
+	case NL80211_IFTYPE_P2P_CLIENT:
+	case NL80211_IFTYPE_ADHOC: {
+		const u8 *ssid_ie;
+		if (!wdev->current_bss)
+			break;
+		rcu_read_lock();
+		ssid_ie = ieee80211_bss_get_ie(&wdev->current_bss->pub,
+					       WLAN_EID_SSID);
+		if (ssid_ie &&
+		    nla_put(msg, NL80211_ATTR_SSID, ssid_ie[1], ssid_ie + 2))
+			goto nla_put_failure_rcu_locked;
+		rcu_read_unlock();
+		break;
+		}
+	default:
+		/* nothing */
+		break;
 	}
+	wdev_unlock(wdev);
 
 	return genlmsg_end(msg, hdr);
 
+ nla_put_failure_rcu_locked:
+	rcu_read_unlock();
+ nla_put_failure_locked:
+	wdev_unlock(wdev);
  nla_put_failure:
 	genlmsg_cancel(msg, hdr);
 	return -EMSGSIZE;
@@ -8280,7 +8315,7 @@ static int nl80211_set_wowlan(struct sk_buff *skb, struct genl_info *info)
 		nla_for_each_nested(pat, tb[NL80211_WOWLAN_TRIG_PKT_PATTERN],
 				    rem) {
 			nla_parse(pat_tb, MAX_NL80211_WOWLAN_PKTPAT,
-				  nla_data(pat), nla_len(pat), NULL);
+				  nla_data(pat), nla_len(pat), nl80211_packet_pattern_policy);
 			err = -EINVAL;
 			if (!pat_tb[NL80211_WOWLAN_PKTPAT_MASK] ||
 			    !pat_tb[NL80211_WOWLAN_PKTPAT_PATTERN])
@@ -8602,6 +8637,7 @@ static int nl80211_update_ft_ies(struct sk_buff *skb, struct genl_info *info)
 		return -EOPNOTSUPP;
 
 	if (!info->attrs[NL80211_ATTR_MDID] ||
+	    !info->attrs[NL80211_ATTR_IE] ||
 	    !is_valid_ie_attr(info->attrs[NL80211_ATTR_IE]))
 		return -EINVAL;
 

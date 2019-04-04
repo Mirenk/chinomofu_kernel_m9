@@ -70,6 +70,14 @@ enum {
 #define TOMTOM_HPH_PA_SETTLE_COMP_OFF 13000
 #define TOMTOM_HPH_PA_RAMP_DELAY 30000
 
+#define TOMTOM_SVASS_INT_STATUS_RCO_WDOG 0x20
+#define TOMTOM_SVASS_INT_STATUS_WDOG_BITE 0x02
+
+/* Add any SVA IRQs that are to be treated as FATAL */
+#define TOMTOM_CPE_FATAL_IRQS \
+	(TOMTOM_SVASS_INT_STATUS_RCO_WDOG | \
+	 TOMTOM_SVASS_INT_STATUS_WDOG_BITE)
+
 #define DAPM_MICBIAS2_EXTERNAL_STANDALONE "MIC BIAS2 External Standalone"
 
 /* RX_HPH_CNP_WG_TIME increases by 0.24ms */
@@ -3943,7 +3951,8 @@ static int tomtom_codec_enable_dec(struct snd_soc_dapm_widget *w,
 				CF_MIN_3DB_150HZ) &&
 			(tx_hpf_work[decimator - 1].tx_hpf_bypass != true)) {
 
-			schedule_delayed_work(&tx_hpf_work[decimator - 1].dwork,
+			queue_delayed_work(system_power_efficient_wq,
+					&tx_hpf_work[decimator - 1].dwork,
 					msecs_to_jiffies(300));
 		}
 		/* apply the digital gain after the decimator is enabled*/
@@ -6289,9 +6298,9 @@ static struct snd_soc_dai_driver tomtom_dai[] = {
 		.capture = {
 			.stream_name = "AIF4 MAD TX",
 			.rates = SNDRV_PCM_RATE_16000,
-			.formats = TOMTOM_FORMATS,
+			.formats = TOMTOM_FORMATS_S16_S24_LE,
 			.rate_min = 16000,
-			.rate_max = 16000,
+			.rate_max = 32000,
 			.channels_min = 1,
 			.channels_max = 1,
 		},
@@ -6364,8 +6373,18 @@ static int tomtom_codec_enable_slim_chmask(struct wcd9xxx_codec_dai_data *dai,
 	int ret = 0;
 	struct wcd9xxx_ch *ch;
 
+	if (!dai) {
+		pr_err("%s: dai data is null, skipping task.", __func__);
+		/* dai is null */
+		return -EINVAL;
+	}
+
 	if (up) {
 		list_for_each_entry(ch, &dai->wcd9xxx_ch_list, list) {
+			if (!ch) {
+				pr_err("%s: ch is null, not continuing.", __func__);
+				return -EINVAL;
+			}
 			ret = wcd9xxx_get_slave_port(ch->ch_num);
 			if (ret < 0) {
 				pr_err("%s: Invalid slave port ID: %d\n",
@@ -6463,6 +6482,11 @@ static int tomtom_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 					      &dai->grph);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		ret = wcd9xxx_disconnect_port(core,
+					      &dai->wcd9xxx_ch_list,
+					      dai->grph);
+		pr_debug("%s: Disconnect RX port, ret = %d\n",
+			 __func__, ret);
 		ret = wcd9xxx_close_slim_sch_rx(core, &dai->wcd9xxx_ch_list,
 						dai->grph);
 		if (!dai->bus_down_in_recovery)
@@ -6470,13 +6494,6 @@ static int tomtom_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 		else
 			pr_debug("%s: bus in recovery skip enable slim_chmask",
 				__func__);
-		if (ret < 0) {
-			ret = wcd9xxx_disconnect_port(core,
-						      &dai->wcd9xxx_ch_list,
-						      dai->grph);
-			pr_debug("%s: Disconnect RX port, ret = %d\n",
-				 __func__, ret);
-		}
 		break;
 	}
 	return ret;
@@ -8841,18 +8858,41 @@ static struct wcd_cpe_core *tomtom_codec_get_cpe_core(
 static int tomtom_codec_fll_enable(struct snd_soc_codec *codec,
 				   bool enable)
 {
-	if (enable) {
+	struct wcd9xxx *wcd9xxx;
+
+	if (!codec || !codec->control_data) {
+		pr_err("%s: Invalid codec handle, %pK\n",
+		       __func__, codec);
+		return -EINVAL;
+	}
+
+	wcd9xxx = codec->control_data;
+
+	dev_dbg(codec->dev, "%s: %s, mclk_rate = %d\n",
+		__func__, (enable ? "enable" : "disable"),
+		wcd9xxx->mclk_rate);
+
+	switch (wcd9xxx->mclk_rate) {
+	case TOMTOM_MCLK_CLK_9P6MHZ:
+		snd_soc_update_bits(codec, TOMTOM_A_FLL_NREF,
+				    0x1F, 0x15);
+		snd_soc_update_bits(codec, TOMTOM_A_FLL_KDCO_TUNE,
+				    0x07, 0x06);
+		snd_soc_write(codec, TOMTOM_A_FLL_LOCK_THRESH,
+			      0xD1);
+		snd_soc_write(codec, TOMTOM_A_FLL_LOCK_DET_COUNT,
+			      0x40);
+		break;
+	case TOMTOM_MCLK_CLK_12P288MHZ:
+		snd_soc_update_bits(codec, TOMTOM_A_FLL_NREF,
+				    0x1F, 0x11);
 		snd_soc_update_bits(codec, TOMTOM_A_FLL_KDCO_TUNE,
 				    0x07, 0x05);
 		snd_soc_write(codec, TOMTOM_A_FLL_LOCK_THRESH,
-			      0xC2);
+			      0xB1);
 		snd_soc_write(codec, TOMTOM_A_FLL_LOCK_DET_COUNT,
 			      0x40);
-		snd_soc_update_bits(codec, TOMTOM_A_FLL_TEST_ENABLE,
-				    0x06, 0x06);
-	} else {
-		snd_soc_update_bits(codec, TOMTOM_A_FLL_KDCO_TUNE,
-				    0x80, 0x00);
+		break;
 	}
 
 	return 0;
@@ -8897,12 +8937,43 @@ static const struct wcd9xxx_resmgr_cb resmgr_cb = {
 	.cdc_rco_ctrl = tomtom_codec_internal_rco_ctrl,
 };
 
+static int tomtom_cpe_err_irq_control(struct snd_soc_codec *codec,
+	enum cpe_err_irq_cntl_type cntl_type, u8 *status)
+{
+	switch (cntl_type) {
+	case CPE_ERR_IRQ_MASK:
+		snd_soc_update_bits(codec,
+				    TOMTOM_A_SVASS_INT_MASK,
+				    0x3F, 0x3F);
+		break;
+	case CPE_ERR_IRQ_UNMASK:
+		snd_soc_update_bits(codec,
+				    TOMTOM_A_SVASS_INT_MASK,
+				    0x3F, 0x0C);
+		break;
+	case CPE_ERR_IRQ_CLEAR:
+		snd_soc_update_bits(codec,
+				    TOMTOM_A_SVASS_INT_CLR,
+				    0x3F, 0x3F);
+		break;
+	case CPE_ERR_IRQ_STATUS:
+		if (!status)
+			return -EINVAL;
+		*status = snd_soc_read(codec,
+				       TOMTOM_A_SVASS_INT_STATUS);
+		break;
+	}
+
+	return 0;
+}
+
 static const struct wcd_cpe_cdc_cb cpe_cb = {
 	.cdc_clk_en = tomtom_codec_internal_rco_ctrl,
 	.cpe_clk_en = tomtom_codec_fll_enable,
 	.lab_cdc_ch_ctl = tomtom_codec_enable_slimtx_mad,
 	.cdc_ext_clk = tomtom_codec_ext_clk_en,
 	.bus_vote_bw = tomtom_codec_vote_max_bw,
+	.cpe_err_irq_control = tomtom_cpe_err_irq_control,
 };
 
 static int tomtom_cpe_initialize(struct snd_soc_codec *codec)
@@ -8920,8 +8991,15 @@ static int tomtom_cpe_initialize(struct snd_soc_codec *codec)
 	cpe_params.cdc_minor_ver = TOMTOM_CPE_MINOR_VER;
 	cpe_params.cdc_id = TOMTOM_CPE_CDC_ID;
 
+	cpe_params.cdc_irq_info.cpe_engine_irq =
+			WCD9330_IRQ_SVASS_ENGINE;
+	cpe_params.cdc_irq_info.cpe_err_irq =
+			WCD9330_IRQ_SVASS_ERR_EXCEPTION;
+	cpe_params.cdc_irq_info.cpe_fatal_irqs =
+			TOMTOM_CPE_FATAL_IRQS;
+
 	tomtom->cpe_core = wcd_cpe_init("cpe", codec,
-						 &cpe_params);
+					&cpe_params);
 	if (IS_ERR_OR_NULL(tomtom->cpe_core)) {
 		dev_err(codec->dev,
 			"%s: Failed to enable CPE\n",
