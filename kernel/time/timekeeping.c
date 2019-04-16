@@ -146,16 +146,10 @@ static void tk_setup_internals(struct timekeeper *tk, struct clocksource *clock)
 /* Timekeeper helper functions. */
 
 #ifdef CONFIG_ARCH_USES_GETTIMEOFFSET
-u32 (*arch_gettimeoffset)(void);
-
-u32 get_arch_timeoffset(void)
-{
-	if (likely(arch_gettimeoffset))
-		return arch_gettimeoffset();
-	return 0;
-}
+static u32 default_arch_gettimeoffset(void) { return 0; }
+u32 (*arch_gettimeoffset)(void) = default_arch_gettimeoffset;
 #else
-static inline u32 get_arch_timeoffset(void) { return 0; }
+static inline u32 arch_gettimeoffset(void) { return 0; }
 #endif
 
 static inline s64 timekeeping_get_ns(struct timekeeper *tk)
@@ -175,7 +169,7 @@ static inline s64 timekeeping_get_ns(struct timekeeper *tk)
 	nsec >>= tk->shift;
 
 	/* If arch requires, add in get_arch_timeoffset() */
-	return nsec + get_arch_timeoffset();
+	return nsec + arch_gettimeoffset();
 }
 
 static inline s64 timekeeping_get_ns_raw(struct timekeeper *tk)
@@ -195,7 +189,7 @@ static inline s64 timekeeping_get_ns_raw(struct timekeeper *tk)
 	nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
 
 	/* If arch requires, add in get_arch_timeoffset() */
-	return nsec + get_arch_timeoffset();
+	return nsec + arch_gettimeoffset();
 }
 
 static RAW_NOTIFIER_HEAD(pvclock_gtod_chain);
@@ -275,7 +269,7 @@ static void timekeeping_forward_now(struct timekeeper *tk)
 	tk->xtime_nsec += cycle_delta * tk->mult;
 
 	/* If arch requires, add in get_arch_timeoffset() */
-	tk->xtime_nsec += (u64)get_arch_timeoffset() << tk->shift;
+	tk->xtime_nsec += (u64)arch_gettimeoffset() << tk->shift;
 
 	tk_normalize_xtime(tk);
 
@@ -491,6 +485,7 @@ int do_settimeofday(const struct timespec *tv)
 	struct timekeeper *tk = &timekeeper;
 	struct timespec ts_delta, xt;
 	unsigned long flags;
+	int ret = 0;
 
 	if (!timespec_valid_strict(tv))
 		return -EINVAL;
@@ -504,10 +499,15 @@ int do_settimeofday(const struct timespec *tv)
 	ts_delta.tv_sec = tv->tv_sec - xt.tv_sec;
 	ts_delta.tv_nsec = tv->tv_nsec - xt.tv_nsec;
 
+	if (timespec_compare(&tk->wall_to_monotonic, &ts_delta) > 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	tk_set_wall_to_mono(tk, timespec_sub(tk->wall_to_monotonic, ts_delta));
 
 	tk_set_xtime(tk, tv);
-
+out:
 	timekeeping_update(tk, true, true);
 
 	write_seqcount_end(&timekeeper_seq);
@@ -516,7 +516,7 @@ int do_settimeofday(const struct timespec *tv)
 	/* signal hrtimers about time change */
 	clock_was_set();
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(do_settimeofday);
 
@@ -543,7 +543,8 @@ int timekeeping_inject_offset(struct timespec *ts)
 
 	/* Make sure the proposed value is valid */
 	tmp = timespec_add(tk_xtime(tk),  *ts);
-	if (!timespec_valid_strict(&tmp)) {
+	if (timespec_compare(&tk->wall_to_monotonic, ts) > 0 ||
+	    !timespec_valid_strict(&tmp)) {
 		ret = -EINVAL;
 		goto error;
 	}
